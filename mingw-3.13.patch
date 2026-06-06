@@ -1,0 +1,956 @@
+diff --git a/Include/pyport.h b/Include/pyport.h
+index 72a157e..0d3cbef 100644
+--- a/Include/pyport.h
++++ b/Include/pyport.h
+@@ -1,6 +1,38 @@
+ #ifndef Py_PYPORT_H
+ #define Py_PYPORT_H
+ 
++#ifdef __MINGW32__
++/* unpins (msys2 0002): translate mingw platform defines to CPython's MS_* names
++   and derive the MS_WINDOWS_* API-family macros that PC/*.c gate on. */
++#if !defined(MS_WIN64) && defined(_WIN64)
++#  define MS_WIN64
++#endif
++#if !defined(MS_WIN32) && defined(_WIN32)
++#  define MS_WIN32
++#endif
++#if !defined(MS_WINDOWS) && defined(MS_WIN32)
++#  define MS_WINDOWS
++#endif
++#if defined(Py_BUILD_CORE) || defined(Py_BUILD_CORE_BUILTIN) || defined(Py_BUILD_CORE_MODULE)
++#include <winapifamily.h>
++#if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP)
++#define MS_WINDOWS_DESKTOP
++#endif
++#if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_APP)
++#define MS_WINDOWS_APP
++#endif
++#if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_SYSTEM)
++#define MS_WINDOWS_SYSTEM
++#endif
++#if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_GAMES)
++#define MS_WINDOWS_GAMES
++#endif
++#if defined(MS_WINDOWS_DESKTOP) || defined(MS_WINDOWS_APP) || defined(MS_WINDOWS_SYSTEM)
++#define HAVE_WINDOWS_CONSOLE_IO 1
++#endif
++#endif /* Py_BUILD_CORE* */
++#endif /* __MINGW32__ */
++
+ #ifndef UCHAR_MAX
+ #  error "<limits.h> header must define UCHAR_MAX"
+ #endif
+@@ -271,7 +303,8 @@ extern "C" {
+     _Pragma("clang diagnostic ignored \"-Wdeprecated-declarations\"")
+ #define _Py_COMP_DIAG_POP _Pragma("clang diagnostic pop")
+ #elif defined(__GNUC__) \
+-    && ((__GNUC__ >= 5) || (__GNUC__ == 4) && (__GNUC_MINOR__ >= 6))
++    && ((__GNUC__ >= 5) || (__GNUC__ == 4) && (__GNUC_MINOR__ >= 6)) \
++    && !defined(__MINGW32__)
+ #define _Py_COMP_DIAG_PUSH _Pragma("GCC diagnostic push")
+ #define _Py_COMP_DIAG_IGNORE_DEPR_DECLS \
+     _Pragma("GCC diagnostic ignored \"-Wdeprecated-declarations\"")
+diff --git a/Lib/site.py b/Lib/site.py
+index 041dca1..34d7c6d 100644
+--- a/Lib/site.py
++++ b/Lib/site.py
+@@ -399,7 +399,7 @@ def getsitepackages(prefixes=None):
+             abi_thread = 't'
+         else:
+             abi_thread = ''
+-        if os.sep == '/':
++        if True:  # os.sep == '/'  (mingw: always use unix layout)
+             libdirs = [sys.platlibdir]
+             if sys.platlibdir != "lib":
+                 libdirs.append("lib")
+diff --git a/Makefile.pre.in b/Makefile.pre.in
+index ecf77bd..90031ab 100644
+--- a/Makefile.pre.in
++++ b/Makefile.pre.in
+@@ -121,7 +121,7 @@ CFLAGSFORSHARED=@CFLAGSFORSHARED@
+ # C flags used for building the interpreter object files
+ PY_STDMODULE_CFLAGS= $(PY_CFLAGS) $(PY_CFLAGS_NODIST) $(PY_CPPFLAGS) $(CFLAGSFORSHARED)
+ PY_BUILTIN_MODULE_CFLAGS= $(PY_STDMODULE_CFLAGS) -DPy_BUILD_CORE_BUILTIN
+-PY_CORE_CFLAGS=	$(PY_STDMODULE_CFLAGS) -DPy_BUILD_CORE
++PY_CORE_CFLAGS=	$(PY_STDMODULE_CFLAGS) -DPy_BUILD_CORE -DMS_WINDOWS -DMS_COREDLL -DMS_DLL_ID=\"@VERSION@\" -DPY3_DLLNAME=\"@DLLLIBRARY@\"
+ # Linker flags used for building the interpreter object files
+ PY_CORE_LDFLAGS=$(PY_LDFLAGS) $(PY_LDFLAGS_NODIST)
+ # Strict or non-strict aliasing flags used to compile dtoa.c, see above
+@@ -294,6 +294,7 @@ LIBOBJS=	@LIBOBJS@
+ 
+ PYTHON=		python$(EXE)
+ BUILDPYTHON=	python$(BUILDEXE)
++BUILDPYTHONW=	pythonw$(BUILDEXE)
+ 
+ HOSTRUNNER= @HOSTRUNNER@
+ 
+@@ -431,7 +432,7 @@ PYTHON_OBJS=	\
+ 		Python/errors.o \
+ 		Python/flowgraph.o \
+ 		Python/frame.o \
+-		Python/frozenmain.o \
++		@PYTHON_OBJS_FROZENMAIN@ \
+ 		Python/future.o \
+ 		Python/gc.o \
+ 		Python/gc_free_threading.o \
+@@ -695,7 +696,7 @@ list-targets:
+ 	@grep -E '^[A-Za-z][-A-Za-z0-9]+:' Makefile | awk -F : '{print $$1}'
+ 
+ .PHONY: build_all
+-build_all:	check-clean-src check-app-store-compliance $(BUILDPYTHON) platform sharedmods \
++build_all:	check-clean-src check-app-store-compliance $(BUILDPYTHON) $(BUILDPYTHONW) platform sharedmods \
+ 		gdbhooks Programs/_testembed scripts checksharedmods rundsymutil
+ 
+ .PHONY: build_wasm
+@@ -876,9 +877,29 @@ clinic: check-clean-src $(srcdir)/Modules/_blake2/blake2s_impl.c
+ clinic-tests: check-clean-src $(srcdir)/Lib/test/clinic.test.c
+ 	$(PYTHON_FOR_REGEN) $(srcdir)/Tools/clinic/clinic.py -f $(srcdir)/Lib/test/clinic.test.c
+ 
++pythonnt_rc.h:
++	# FIXME: FIELD3 not set
++	@echo '#define FIELD3 0' > $@
++	@echo '#define MS_DLL_ID "$(VERSION)"' >> $@
++	@echo '#define PYTHON_DLL_NAME "$(DLLLIBRARY)"' >> $@
++
++python_exe.o: pythonnt_rc.h $(srcdir)/PC/python_exe.rc
++	$(WINDRES) -I$(srcdir)/Include -I$(srcdir)/PC -I. $(srcdir)/PC/python_exe.rc $@
++
++pythonw_exe.o: pythonnt_rc.h $(srcdir)/PC/pythonw_exe.rc
++	$(WINDRES) -I$(srcdir)/Include -I$(srcdir)/PC -I. $(srcdir)/PC/pythonw_exe.rc $@
++
++python_nt.o: pythonnt_rc.h $(srcdir)/PC/python_nt.rc
++	$(WINDRES) -I$(srcdir)/Include -I$(srcdir)/PC -I. $(srcdir)/PC/python_nt.rc $@
++
++$(BUILDPYTHONW): Programs/python.o $(LIBRARY) $(LDLIBRARY) $(PY3LIBRARY) pythonw_exe.o
++	$(LINKCC) $(PY_CORE_LDFLAGS) $(LINKFORSHARED) -municode -mwindows -o $@ Programs/python.o $(BLDLIBRARY) $(LIBS) $(MODLIBS) $(SYSLIBS) $(LDLAST) pythonw_exe.o
++
++
++
+ # Build the interpreter
+-$(BUILDPYTHON):	Programs/python.o $(LINK_PYTHON_DEPS)
+-	$(LINKCC) $(PY_CORE_LDFLAGS) $(LINKFORSHARED) -o $@ Programs/python.o $(LINK_PYTHON_OBJS) $(LIBS) $(MODLIBS) $(SYSLIBS)
++$(BUILDPYTHON):	Programs/python.o $(LINK_PYTHON_DEPS) python_exe.o
++	$(LINKCC) $(PY_CORE_LDFLAGS) $(LINKFORSHARED) -o $@ Programs/python.o $(LINK_PYTHON_OBJS) $(LIBS) $(MODLIBS) $(SYSLIBS) python_exe.o
+ 
+ platform: $(PYTHON_FOR_BUILD_DEPS) pybuilddir.txt
+ 	$(RUNSHARED) $(PYTHON_FOR_BUILD) -c 'import sys ; from sysconfig import get_platform ; print("%s-%d.%d" % (get_platform(), *sys.version_info[:2]))' >platform
+@@ -984,10 +1005,10 @@ $(PYTHONFRAMEWORKDIR)/$(PYTHONFRAMEWORK): \
+ 
+ # This rule builds the Cygwin Python DLL and import library if configured
+ # for a shared core library; otherwise, this rule is a noop.
+-$(DLLLIBRARY) libpython$(LDVERSION).dll.a: $(LIBRARY_OBJS)
++$(DLLLIBRARY) libpython$(LDVERSION).dll.a: $(LIBRARY_OBJS) python_nt.o
+ 	if test -n "$(DLLLIBRARY)"; then \
+ 		$(LDSHARED) -Wl,--out-implib=$@ -o $(DLLLIBRARY) $^ \
+-			$(LIBS) $(MODLIBS) $(SYSLIBS); \
++			$(LIBS) $(MODLIBS) $(SYSLIBS) python_nt.o; \
+ 	else true; \
+ 	fi
+ 
+@@ -2195,6 +2216,7 @@ altbininstall: $(BUILDPYTHON) @FRAMEWORKPYTHONW@
+ 	done
+ 	if test "$(PYTHONFRAMEWORKDIR)" = "no-framework" ; then \
+ 		$(INSTALL_PROGRAM) $(BUILDPYTHON) $(DESTDIR)$(BINDIR)/python$(LDVERSION)$(EXE); \
++		$(INSTALL_PROGRAM) $(BUILDPYTHONW) $(DESTDIR)$(BINDIR)/python3w$(EXE); \
+ 	else \
+ 		$(INSTALL_PROGRAM) $(STRIPFLAG) Mac/pythonw $(DESTDIR)$(BINDIR)/python$(LDVERSION)$(EXE); \
+ 	fi
+diff --git a/Modules/Setup b/Modules/Setup
+index e4acf6b..8b11813 100644
+--- a/Modules/Setup
++++ b/Modules/Setup
+@@ -147,7 +147,7 @@ PYTHONPATH=$(COREPYTHONPATH)
+ #_pickle _pickle.c
+ #_queue _queuemodule.c
+ #_random _randommodule.c
+-#_socket socketmodule.c
++_socket socketmodule.c -lws2_32 -liphlpapi
+ #_statistics _statisticsmodule.c
+ #_struct _struct.c
+ #_typing _typingmodule.c
+@@ -156,7 +156,7 @@ PYTHONPATH=$(COREPYTHONPATH)
+ #binascii binascii.c
+ #cmath cmathmodule.c
+ #math mathmodule.c
+-#mmap mmapmodule.c
++mmap mmapmodule.c
+ #select selectmodule.c
+ #_sysconfig _sysconfig.c
+ 
+@@ -265,6 +265,12 @@ PYTHONPATH=$(COREPYTHONPATH)
+ # macOS specific module, needs SystemConfiguration and CoreFoundation framework
+ # _scproxy _scproxy.c
+ 
++# Windows specific modules
++msvcrt ../PC/msvcrtmodule.c
++_winapi _winapi.c
++winsound ../PC/winsound.c -lwinmm
++_overlapped overlapped.c
++
+ # Examples
+ 
+ #xx xxmodule.c
+diff --git a/Modules/Setup.bootstrap.in b/Modules/Setup.bootstrap.in
+index aa4e60e..35184b0 100644
+--- a/Modules/Setup.bootstrap.in
++++ b/Modules/Setup.bootstrap.in
+@@ -8,8 +8,8 @@
+ # module C APIs are used in core
+ atexit atexitmodule.c
+ faulthandler faulthandler.c
+-posix posixmodule.c
+-_signal signalmodule.c
++nt posixmodule.c
++_signal signalmodule.c -lws2_32
+ _tracemalloc _tracemalloc.c
+ _suggestions _suggestions.c
+ 
+@@ -17,7 +17,7 @@ _suggestions _suggestions.c
+ _codecs _codecsmodule.c
+ _collections _collectionsmodule.c
+ errno errnomodule.c
+-_io _io/_iomodule.c _io/iobase.c _io/fileio.c _io/bytesio.c _io/bufferedio.c _io/textio.c _io/stringio.c
++_io _io/_iomodule.c _io/iobase.c _io/fileio.c _io/bytesio.c _io/bufferedio.c _io/textio.c _io/stringio.c _io/winconsoleio.c
+ itertools itertoolsmodule.c
+ _sre _sre/sre.c
+ _sysconfig _sysconfig.c
+@@ -36,3 +36,5 @@ _symtable symtablemodule.c
+ 
+ # for systems without $HOME env, used by site._getuserbase()
+ @MODULE_PWD_TRUE@pwd pwdmodule.c
++
++winreg ../PC/winreg.c
+diff --git a/Modules/_ctypes/_ctypes.c b/Modules/_ctypes/_ctypes.c
+index aac8128..b88d357 100644
+--- a/Modules/_ctypes/_ctypes.c
++++ b/Modules/_ctypes/_ctypes.c
+@@ -104,6 +104,7 @@ bytes(cdata)
+ // windows.h must be included before pycore internal headers
+ #ifdef MS_WIN32
+ #  include <windows.h>
++#  include <dlfcn.h>
+ #endif
+ 
+ #include "pycore_call.h"          // _PyObject_CallNoArgs()
+diff --git a/Modules/_ctypes/ctypes.h b/Modules/_ctypes/ctypes.h
+index d46675a..e5f2c3a 100644
+--- a/Modules/_ctypes/ctypes.h
++++ b/Modules/_ctypes/ctypes.h
+@@ -36,7 +36,7 @@
+ #endif
+ 
+ #ifdef MS_WIN32
+-#include <Unknwn.h> // for IUnknown interface
++#include <unknwn.h> // for IUnknown interface
+ #endif
+ 
+ typedef struct {
+diff --git a/Modules/_multiprocessing/semaphore.c b/Modules/_multiprocessing/semaphore.c
+index 8c6a4a2..b299185 100644
+--- a/Modules/_multiprocessing/semaphore.c
++++ b/Modules/_multiprocessing/semaphore.c
+@@ -8,6 +8,9 @@
+  */
+ 
+ #include "multiprocessing.h"
++#ifdef __MINGW32__
++#include <semaphore.h>
++#endif
+ 
+ #ifdef HAVE_SYS_TIME_H
+ #  include <sys/time.h>           // gettimeofday()
+@@ -630,8 +633,12 @@ _multiprocessing_SemLock__get_value_impl(SemLockObject *self)
+ #ifdef HAVE_BROKEN_SEM_GETVALUE
+     PyErr_SetNone(PyExc_NotImplementedError);
+     return NULL;
++#else
++#ifdef MS_WINDOWS
++    long sval;  /* _GetSemaphoreValue() takes long* on Windows */
+ #else
+     int sval;
++#endif
+     if (SEM_GETVALUE(self->handle, &sval) < 0)
+         return _PyMp_SetError(NULL, MP_STANDARD_ERROR);
+     /* some posix implementations use negative numbers to indicate
+@@ -662,8 +669,12 @@ _multiprocessing_SemLock__is_zero_impl(SemLockObject *self)
+             return _PyMp_SetError(NULL, MP_STANDARD_ERROR);
+         Py_RETURN_FALSE;
+     }
++#else
++#ifdef MS_WINDOWS
++    long sval;  /* _GetSemaphoreValue() takes long* on Windows */
+ #else
+     int sval;
++#endif
+     if (SEM_GETVALUE(self->handle, &sval) < 0)
+         return _PyMp_SetError(NULL, MP_STANDARD_ERROR);
+     return PyBool_FromLong((long)sval == 0);
+diff --git a/Modules/getpath.c b/Modules/getpath.c
+index d0128b2..21b2b79 100644
+--- a/Modules/getpath.c
++++ b/Modules/getpath.c
+@@ -921,7 +921,11 @@ _PyConfig_InitPathConfig(PyConfig *config, int compute_path_config)
+ 
+     if (
+ #ifdef MS_WINDOWS
++# ifdef __MINGW32__
++        !decode_to_dict(dict, "os_name", "mingw") ||
++# else
+         !decode_to_dict(dict, "os_name", "nt") ||
++# endif
+ #elif defined(__APPLE__)
+         !decode_to_dict(dict, "os_name", "darwin") ||
+ #else
+diff --git a/Modules/getpath.py b/Modules/getpath.py
+index 1f1bfcb..71d7a78 100644
+--- a/Modules/getpath.py
++++ b/Modules/getpath.py
+@@ -188,6 +188,19 @@ if os_name == 'posix' or os_name == 'darwin':
+     DELIM = ':'
+     SEP = '/'
+ 
++elif os_name == 'mingw':
++    BUILDDIR_TXT = 'pybuilddir.txt'
++    BUILD_LANDMARK = f'Modules\\Setup.local'
++    DEFAULT_PROGRAM_NAME = f'python{VERSION_MAJOR}'
++    STDLIB_SUBDIR = f'{platlibdir}\\python{VERSION_MAJOR}.{VERSION_MINOR}'
++    STDLIB_LANDMARKS = [f'{STDLIB_SUBDIR}\\os.py', f'{STDLIB_SUBDIR}\\os.pyc']
++    PLATSTDLIB_LANDMARK = f'{platlibdir}\\python{VERSION_MAJOR}.{VERSION_MINOR}\\lib-dynload'
++    BUILDSTDLIB_LANDMARKS = ['Lib\\os.py']
++    VENV_LANDMARK = 'pyvenv.cfg'
++    ZIP_LANDMARK = f'{platlibdir}\\python{VERSION_MAJOR}{VERSION_MINOR}.zip'
++    DELIM = ';'
++    SEP = '\\'
++
+ elif os_name == 'nt':
+     BUILDDIR_TXT = 'pybuilddir.txt'
+     BUILD_LANDMARK = f'{VPATH}\\Modules\\Setup.local'
+@@ -461,7 +474,7 @@ if not py_setpath and not home_was_set:
+     # ._pth file, but it cannot override the library's one.
+     for p in [library, executable, real_executable]:
+         if p:
+-            if os_name == 'nt' and (hassuffix(p, 'exe') or hassuffix(p, 'dll')):
++            if (os_name == 'nt' or os_name == 'mingw') and (hassuffix(p, 'exe') or hassuffix(p, 'dll')):
+                 p = p.rpartition('.')[0]
+             p += '._pth'
+             try:
+diff --git a/Modules/mmapmodule.c b/Modules/mmapmodule.c
+index 0e1a709..79821a7 100644
+--- a/Modules/mmapmodule.c
++++ b/Modules/mmapmodule.c
+@@ -62,6 +62,12 @@ my_getallocationgranularity (void)
+ 
+ #endif
+ 
++#if defined(_DEBUG) || defined(__MINGW32__)
++/* Don't use structured exception handling on Windows if this is defined.
++   MinGW, AFAIK, doesn't support it. (copied from callproc.c) */
++#define DONT_USE_SEH
++#endif
++
+ #ifdef UNIX
+ #include <sys/mman.h>
+ #include <sys/stat.h>
+diff --git a/Modules/posixmodule.c b/Modules/posixmodule.c
+index 78a8776..bb2df47 100644
+--- a/Modules/posixmodule.c
++++ b/Modules/posixmodule.c
+@@ -374,8 +374,8 @@ corresponding Unix manual entries for more information on calls.");
+ #  define HAVE_OPENDIR    1
+ #  define HAVE_SYSTEM     1
+ #  include <process.h>
+-#elif defined( _MSC_VER)
+-  /* Microsoft compiler */
++#elif defined(MS_WINDOWS)
++  /* Microsoft compiler or mingw */
+ #  if defined(MS_WINDOWS_DESKTOP) || defined(MS_WINDOWS_APP) || defined(MS_WINDOWS_SYSTEM)
+ #    define HAVE_GETPPID    1
+ #  endif /* MS_WINDOWS_DESKTOP | MS_WINDOWS_APP | MS_WINDOWS_SYSTEM */
+@@ -470,7 +470,7 @@ extern char        *ctermid_r(char *);
+ #  endif
+ #endif
+ 
+-#ifdef _MSC_VER
++#ifdef MS_WINDOWS
+ #  ifdef HAVE_DIRECT_H
+ #    include <direct.h>
+ #  endif
+@@ -4349,7 +4349,7 @@ os_link_impl(PyObject *module, path_t *src, path_t *dst, int src_dir_fd,
+ #endif
+ 
+ 
+-#if defined(MS_WINDOWS) && !defined(HAVE_OPENDIR)
++#if defined(MS_WINDOWS)
+ static PyObject *
+ _listdir_windows_no_opendir(path_t *path, PyObject *list)
+ {
+@@ -4592,7 +4592,7 @@ os_listdir_impl(PyObject *module, path_t *path)
+                     path->object ? path->object : Py_None) < 0) {
+         return NULL;
+     }
+-#if defined(MS_WINDOWS) && !defined(HAVE_OPENDIR)
++#if defined(MS_WINDOWS)
+     return _listdir_windows_no_opendir(path, NULL);
+ #else
+     return _posix_listdir(path, NULL);
+@@ -9332,7 +9332,7 @@ os_setpgrp_impl(PyObject *module)
+ 
+ #ifdef MS_WINDOWS
+ #include <winternl.h>
+-#include <ProcessSnapshot.h>
++#include <processsnapshot.h>
+ 
+ // The structure definition in winternl.h may be incomplete.
+ // This structure is the full version from the MSDN documentation.
+diff --git a/Modules/selectmodule.c b/Modules/selectmodule.c
+index 5bd9b77..dbb5dce 100644
+--- a/Modules/selectmodule.c
++++ b/Modules/selectmodule.c
+@@ -168,9 +168,9 @@ seq2set(PyObject *seq, fd_set *set, pylist fd2obj[FD_SETSIZE + 1])
+         v = PyObject_AsFileDescriptor( o );
+         if (v == -1) goto finally;
+ 
+-#if defined(_MSC_VER)
++#if defined(MS_WINDOWS)
+         max = 0;                             /* not used for Win32 */
+-#else  /* !_MSC_VER */
++#else  /* MS_WINDOWS */
+         if (!_PyIsSelectable_fd(v)) {
+             PyErr_SetString(PyExc_ValueError,
+                         "filedescriptor out of range in select()");
+@@ -178,7 +178,7 @@ seq2set(PyObject *seq, fd_set *set, pylist fd2obj[FD_SETSIZE + 1])
+         }
+         if (v > max)
+             max = v;
+-#endif /* _MSC_VER */
++#endif /* MS_WINDOWS */
+         FD_SET(v, set);
+ 
+         /* add object and its file descriptor to the list */
+diff --git a/Modules/socketmodule.c b/Modules/socketmodule.c
+index becdf9a..4ce80c3 100644
+--- a/Modules/socketmodule.c
++++ b/Modules/socketmodule.c
+@@ -279,9 +279,13 @@ shutdown(how) -- shut down traffic in one or both directions\n\
+ # endif
+ 
+ /* Helpers needed for AF_HYPERV */
+-# include <Rpc.h>
++# include <rpc.h>
+ 
+ /* Macros based on the IPPROTO enum, see: https://bugs.python.org/issue29515 */
++/* unpins: only MSVC's winsock headers define all these IPPROTO_* values; on
++   mingw the self-#define would make #ifdef IPPROTO_X true for values mingw
++   lacks, breaking the (already #ifdef-guarded) registrations below. */
++#ifdef _MSC_VER
+ #define IPPROTO_ICMP IPPROTO_ICMP
+ #define IPPROTO_IGMP IPPROTO_IGMP
+ #define IPPROTO_GGP IPPROTO_GGP
+@@ -312,6 +316,7 @@ shutdown(how) -- shut down traffic in one or both directions\n\
+ #define IPPROTO_PGM IPPROTO_PGM  // WinSock2 only
+ #define IPPROTO_L2TP IPPROTO_L2TP  // WinSock2 only
+ #define IPPROTO_SCTP IPPROTO_SCTP  // WinSock2 only
++#endif /* _MSC_VER */
+ 
+ /* Provides the IsWindows7SP1OrGreater() function */
+ #include <versionhelpers.h>
+@@ -420,6 +425,10 @@ remove_unusable_flags(PyObject *m)
+   /* Do not include addrinfo.h for MSVC7 or greater. 'addrinfo' and
+    * EAI_* constants are defined in (the already included) ws2tcpip.h.
+    */
++#elif defined(__MINGW32__)
++  /* Do not include addrinfo.h as minimum supported version is
++   * _WIN32_WINNT >= WindowsXP(0x0501)
++   */
+ #else
+ #  include "addrinfo.h"
+ #endif
+@@ -8398,7 +8407,7 @@ socket_exec(PyObject *m)
+     ADD_INT_MACRO(m, IPPROTO_MAX);
+ #endif
+ 
+-#ifdef  MS_WINDOWS
++#ifdef  _MSC_VER
+     ADD_INT_MACRO(m, IPPROTO_ICLFXBM);
+     ADD_INT_MACRO(m, IPPROTO_ST);
+     ADD_INT_MACRO(m, IPPROTO_CBT);
+diff --git a/Objects/exceptions.c b/Objects/exceptions.c
+index 1eb2a3b..26c01c9 100644
+--- a/Objects/exceptions.c
++++ b/Objects/exceptions.c
+@@ -1744,7 +1744,9 @@ MiddlingExtendsException(PyExc_ImportError, ModuleNotFoundError, ImportError,
+  */
+ 
+ #ifdef MS_WINDOWS
+-#include "errmap.h"
++#include <winsock2.h>
++#include <windows.h>
++#include "../PC/errmap.h"
+ #endif
+ 
+ /* Where a function has a single filename, such as open() or some
+diff --git a/PC/dl_nt.c b/PC/dl_nt.c
+index 7f17ee1..4d9b6a9 100644
+--- a/PC/dl_nt.c
++++ b/PC/dl_nt.c
+@@ -33,4 +33,11 @@ BOOL    WINAPI  DllMain (HANDLE hInst,
+     return TRUE;
+ }
+ 
++#else /* !Py_ENABLE_SHARED */
++
++/* unpins: static single-binary build has no companion DLL, but sysmodule.c
++   still references these for sys.dllhandle / sys.winver. */
++void *PyWin_DLLhModule = NULL;
++const char *PyWin_DLLVersionString = MS_DLL_ID;
++
+ #endif /* Py_ENABLE_SHARED */
+diff --git a/PC/python_exe.rc b/PC/python_exe.rc
+index c3d3bff..dde0e53 100644
+--- a/PC/python_exe.rc
++++ b/PC/python_exe.rc
+@@ -12,7 +12,7 @@
+ // current versions of Windows.
+ 1 RT_MANIFEST "python.manifest"
+ 
+-1 ICON DISCARDABLE "icons\python.ico" 
++1 ICON DISCARDABLE "icons/python.ico"
+ 
+ 
+ /////////////////////////////////////////////////////////////////////////////
+diff --git a/PC/python_nt.rc b/PC/python_nt.rc
+index ae64fbd..6043da5 100644
+--- a/PC/python_nt.rc
++++ b/PC/python_nt.rc
+@@ -39,7 +39,7 @@ BEGIN
+             VALUE "FileVersion", PYTHON_VERSION
+             VALUE "InternalName", "Python DLL\0"
+             VALUE "LegalCopyright", PYTHON_COPYRIGHT "\0"
+-            VALUE "OriginalFilename", ORIGINAL_FILENAME "\0"
++            VALUE "OriginalFilename", PYTHON_DLL_NAME "\0"
+             VALUE "ProductName", "Python\0"
+             VALUE "ProductVersion", PYTHON_VERSION
+         END
+diff --git a/PC/python_ver_rc.h b/PC/python_ver_rc.h
+index 08509f9..399ba06 100644
+--- a/PC/python_ver_rc.h
++++ b/PC/python_ver_rc.h
+@@ -3,6 +3,7 @@
+ //
+ #pragma code_page(1252)
+ #include "winver.h"
++#include "pythonnt_rc.h"
+ 
+ #define PYTHON_COMPANY   "Python Software Foundation"
+ #define PYTHON_COPYRIGHT "Copyright \xA9 2001-2024 Python Software Foundation. Copyright \xA9 2000 BeOpen.com. Copyright \xA9 1995-2001 CNRI. Copyright \xA9 1991-1995 SMC."
+diff --git a/PC/pythonw_exe.rc b/PC/pythonw_exe.rc
+index 38570b7..7ce1043 100644
+--- a/PC/pythonw_exe.rc
++++ b/PC/pythonw_exe.rc
+@@ -12,7 +12,7 @@
+ // current versions of Windows.
+ 1 RT_MANIFEST "python.manifest"
+ 
+-1 ICON DISCARDABLE "icons\pythonw.ico" 
++1 ICON DISCARDABLE "icons/pythonw.ico"
+ 
+ 
+ /////////////////////////////////////////////////////////////////////////////
+diff --git a/Programs/python.c b/Programs/python.c
+index 84148f7..10cf742 100644
+--- a/Programs/python.c
++++ b/Programs/python.c
+@@ -8,10 +8,9 @@ wmain(int argc, wchar_t **argv)
+ {
+     return Py_Main(argc, argv);
+ }
+-#else
++#endif
+ int
+ main(int argc, char **argv)
+ {
+     return Py_BytesMain(argc, argv);
+ }
+-#endif
+diff --git a/Python/dynload_win.c b/Python/dynload_win.c
+index a0ac31c..4e0255b 100644
+--- a/Python/dynload_win.c
++++ b/Python/dynload_win.c
+@@ -152,7 +152,7 @@ static char *GetPythonImport (HINSTANCE hModule)
+    Return whether the DLL was found.
+ */
+ extern HMODULE PyWin_DLLhModule;
+-static int
++int
+ _Py_CheckPython3(void)
+ {
+     static int python3_checked = 0;
+diff --git a/Python/pylifecycle.c b/Python/pylifecycle.c
+index 8ba9b2b..3251190 100644
+--- a/Python/pylifecycle.c
++++ b/Python/pylifecycle.c
+@@ -78,6 +78,27 @@
+ 
+ #define PUTS(fd, str) (void)_Py_write_noraise(fd, str, (int)strlen(str))
+ 
++#if defined(__MINGW32__) && defined(PY_COERCE_C_LOCALE)
++#include <windows.h>
++
++static int
++setenv (const char *var, const char *val, int ovr)
++{
++  BOOL b;
++  char c[2];
++  if (!ovr)
++  {
++    DWORD d;
++    d = GetEnvironmentVariableA (var, c, 2);
++    if (0 != d && GetLastError () != ERROR_ENVVAR_NOT_FOUND)
++      return 1;
++  }
++  b = SetEnvironmentVariableA (var, val);
++  if (b)
++    return 0;
++  return 1;
++}
++#endif
+ 
+ /* Forward declarations */
+ static PyStatus add_main_module(PyInterpreterState *interp);
+diff --git a/Python/sysmodule.c b/Python/sysmodule.c
+index 8d47177..d67f2a7 100644
+--- a/Python/sysmodule.c
++++ b/Python/sysmodule.c
+@@ -3665,6 +3665,9 @@ _PySys_InitCore(PyThreadState *tstate, PyObject *sysdict)
+     /* getwindowsversion */
+     ENSURE_INFO_TYPE(WindowsVersionType, windows_version_desc);
+ 
++#ifndef VPATH
++#define VPATH "..\\.."
++#endif
+     SET_SYS_FROM_STRING("_vpath", VPATH);
+ #endif
+ 
+diff --git a/Python/thread_pthread.h b/Python/thread_pthread.h
+index da40582..db67396 100644
+--- a/Python/thread_pthread.h
++++ b/Python/thread_pthread.h
+@@ -409,6 +409,9 @@ PyThread_get_thread_native_id(void)
+ #elif defined(__DragonFly__)
+     lwpid_t native_id;
+     native_id = lwp_gettid();
++#elif defined(__MINGW32__)
++    pthread_t native_id;
++    native_id = pthread_self();
+ #endif
+     return (unsigned long) native_id;
+ }
+@@ -434,8 +437,8 @@ void _Py_NO_RETURN
+ PyThread_hang_thread(void)
+ {
+     while (1) {
+-#if defined(__wasi__)
+-        sleep(9999999);  // WASI doesn't have pause() ?!
++#if defined(__wasi__) || defined(__MINGW32__)
++        sleep(9999999);  // WASI/mingw don't have pause()
+ #else
+         pause();
+ #endif
+diff --git a/config.site-mingw b/config.site-mingw
+new file mode 100644
+index 0000000..c273024
+--- /dev/null
++++ b/config.site-mingw
+@@ -0,0 +1,2 @@
++ac_cv_file__dev_ptmx=no
++ac_cv_file__dev_ptc=no
+diff --git a/configure.ac b/configure.ac
+index d9acfce..09c8a05 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -310,6 +310,13 @@ fi
+ # Set name for machine-dependent library files
+ AC_ARG_VAR([MACHDEP], [name for machine-dependent library files])
+ AC_MSG_CHECKING([MACHDEP])
++case $host in
++  *-*-mingw*)
++    test -z "$MACHDEP" && MACHDEP=win32
++    dnl Base config only on host triplet; must not depend on a posix env.
++    ac_sys_system=ignore
++    ;;
++esac
+ if test -z "$MACHDEP"
+ then
+     # avoid using uname for cross builds
+@@ -339,6 +346,8 @@ then
+ 	*-*-wasi*)
+ 	    ac_sys_system=WASI
+ 	    ;;
++        *-*-mingw*)
++            ;;
+ 	*)
+ 		# for now, limit cross builds to known configurations
+ 		MACHDEP="unknown"
+@@ -777,12 +786,21 @@ if test "$cross_compiling" = yes; then
+ 	wasm32-*-* | wasm64-*-*)
+ 		_host_ident=$host_cpu
+ 		;;
++	*-*-mingw*)
++		_host_ident=
++		;;
+ 	*)
+ 		# for now, limit cross builds to known configurations
+ 		MACHDEP="unknown"
+ 		AC_MSG_ERROR([cross build not supported for $host])
+ 	esac
+ 	_PYTHON_HOST_PLATFORM="$MACHDEP${_host_ident:+-$_host_ident}"
++	case "$host_os" in
++	mingw*)
++		dnl sys.platform is 'win32' but the host platform tag is 'mingw'
++		_PYTHON_HOST_PLATFORM=mingw
++		;;
++	esac
+ fi
+ 
+ # Some systems cannot stand _XOPEN_SOURCE being defined at all; they
+@@ -1599,6 +1617,13 @@ if test $enable_shared = "yes"; then
+       ;;
+ 
+   esac
++  case $host in
++    *-*-mingw*)
++        LDLIBRARY='libpython$(LDVERSION).dll.a'
++        DLLLIBRARY='libpython$(LDVERSION).dll'
++        BLDLIBRARY='-L. -lpython$(LDVERSION)'
++        ;;
++  esac
+ else # shared is disabled
+   PY_ENABLE_SHARED=0
+   case $ac_sys_system in
+@@ -1607,6 +1632,10 @@ else # shared is disabled
+       LDLIBRARY='libpython$(LDVERSION).dll.a'
+       ;;
+   esac
++  case $host in
++    *-*-mingw*)
++          LDLIBRARY='libpython$(LDVERSION).a';;
++  esac
+ fi
+ AC_MSG_RESULT([$LDLIBRARY])
+ 
+@@ -3411,6 +3440,9 @@ if test -z "$SHLIB_SUFFIX"; then
+ 	CYGWIN*)   SHLIB_SUFFIX=.dll;;
+ 	*)	   SHLIB_SUFFIX=.so;;
+ 	esac
++	case $host_os in
++	mingw*)    SHLIB_SUFFIX=.dll;;
++	esac
+ fi
+ AC_MSG_RESULT([$SHLIB_SUFFIX])
+ 
+@@ -3547,6 +3579,12 @@ then
+ 		LDCXXSHARED="g++ -shared -Wl,--enable-auto-image-base";;
+ 	*)	LDSHARED="ld";;
+ 	esac
++	case $host in
++	*-*-mingw*)
++		LDSHARED='$(CC) -shared -Wl,--enable-auto-image-base'
++		LDCXXSHARED='$(CXX) -shared -Wl,--enable-auto-image-base'
++		;;
++	esac
+ fi
+ 
+ dnl Emscripten's emconfigure sets LDSHARED. Set BLDSHARED outside the
+@@ -5169,6 +5207,12 @@ then
+ 	fi
+ 	;;
+ 	esac
++	case $host in
++	*-*-mingw*)
++	DYNLOADFILE="dynload_win.o"
++	extra_machdep_objs="$extra_machdep_objs PC/dl_nt.o"
++	;;
++	esac
+ fi
+ AC_MSG_RESULT([$DYNLOADFILE])
+ if test "$DYNLOADFILE" != "dynload_stub.o"
+@@ -5219,12 +5263,12 @@ fi
+ 
+ # checks for library functions
+ AC_CHECK_FUNCS([ \
+-  accept4 alarm bind_textdomain_codeset chmod chown clock closefrom close_range confstr \
++  accept4 bind_textdomain_codeset chmod chown clock closefrom close_range confstr \
+   copy_file_range ctermid dup dup3 execv explicit_bzero explicit_memset \
+   faccessat fchmod fchmodat fchown fchownat fdopendir fdwalk fexecve \
+   fork fork1 fpathconf fstatat ftime ftruncate futimens futimes futimesat \
+   gai_strerror getegid geteuid getgid getgrent getgrgid getgrgid_r \
+-  getgrnam_r getgrouplist gethostname getitimer getloadavg getlogin getlogin_r \
++  getgrnam_r getgrouplist getitimer getloadavg getlogin getlogin_r \
+   getpeername getpgid getpid getppid getpriority _getpty \
+   getpwent getpwnam_r getpwuid getpwuid_r getresgid getresuid getrusage getsid getspent \
+   getspnam getuid getwd grantpt if_nameindex initgroups kill killpg lchown linkat \
+@@ -5238,7 +5282,7 @@ AC_CHECK_FUNCS([ \
+   sched_setparam sched_setscheduler sem_clockwait sem_getvalue sem_open \
+   sem_timedwait sem_unlink sendfile setegid seteuid setgid sethostname \
+   setitimer setlocale setpgid setpgrp setpriority setregid setresgid \
+-  setresuid setreuid setsid setuid setvbuf shutdown sigaction sigaltstack \
++  setresuid setreuid setsid setuid setvbuf sigaction sigaltstack \
+   sigfillset siginterrupt sigpending sigrelse sigtimedwait sigwait \
+   sigwaitinfo snprintf splice strftime strlcpy strsignal symlinkat sync \
+   sysconf tcgetpgrp tcsetpgrp tempnam timegm times tmpfile \
+@@ -5467,7 +5511,13 @@ PKG_CHECK_MODULES([LIBLZMA], [liblzma], [have_liblzma=yes], [
+ ])
+ 
+ dnl PY_CHECK_NETDB_FUNC(FUNCTION)
+-AC_DEFUN([PY_CHECK_NETDB_FUNC], [PY_CHECK_FUNC([$1], [@%:@include <netdb.h>])])
++AC_DEFUN([PY_CHECK_NETDB_FUNC], [PY_CHECK_FUNC([$1], [
++#ifdef _WIN32
++  #include <winsock.h>
++#else
++  #include <netdb.h>
++#endif
++])])
+ 
+ PY_CHECK_NETDB_FUNC([hstrerror])
+ dnl not available in WASI yet
+@@ -5476,13 +5526,20 @@ PY_CHECK_NETDB_FUNC([getservbyport])
+ PY_CHECK_NETDB_FUNC([gethostbyname])
+ PY_CHECK_NETDB_FUNC([gethostbyaddr])
+ PY_CHECK_NETDB_FUNC([getprotobyname])
++PY_CHECK_NETDB_FUNC([gethostname])
++PY_CHECK_NETDB_FUNC([shutdown])
++PY_CHECK_NETDB_FUNC([gethostname])
+ 
+ dnl PY_CHECK_SOCKET_FUNC(FUNCTION)
+ AC_DEFUN([PY_CHECK_SOCKET_FUNC], [PY_CHECK_FUNC([$1], [
+ #include <sys/types.h>
+-#include <sys/socket.h>
+-#include <netinet/in.h>
+-#include <arpa/inet.h>
++#ifdef _WIN32
++#  include <winsock2.h>
++#else
++#  include <sys/socket.h>
++#  include <netinet/in.h>
++#  include <arpa/inet.h>
++#endif
+ ])])
+ 
+ PY_CHECK_SOCKET_FUNC([inet_aton])
+@@ -6977,6 +7034,9 @@ AC_CHECK_TYPES([socklen_t], [],
+ #ifdef HAVE_SYS_SOCKET_H
+ #include <sys/socket.h>
+ #endif
++#ifdef __MINGW32__
++#include <ws2tcpip.h>
++#endif
+ ])
+ 
+ AC_CACHE_CHECK([for broken mbstowcs], [ac_cv_broken_mbstowcs],
+@@ -7064,6 +7124,15 @@ do
+   THREADHEADERS="$THREADHEADERS \$(srcdir)/$h"
+ done
+ 
++dnl unpins (Fedora frozenmain): main program for frozen scripts; mingw omits it
++AC_SUBST([PYTHON_OBJS_FROZENMAIN])
++PYTHON_OBJS_FROZENMAIN="Python/frozenmain.o"
++case $host in
++  *-*-mingw*)
++    PYTHON_OBJS_FROZENMAIN=
++    ;;
++esac
++
+ AC_SUBST([SRCDIRS])
+ SRCDIRS="\
+   Modules \
+@@ -7423,6 +7492,19 @@ WITH_SAVE_ENV([
+   ])
+ ])
+ 
++# For mingw build need additional library for linking
++case $host in
++  *-*-mingw*)
++    LIBS="$LIBS -lversion -lshlwapi -lpathcch -lbcrypt -lws2_32 -liphlpapi -lrpcrt4 -lwinmm -lole32 -loleaut32 -luuid -ladvapi32 -lsecur32 -lcrypt32 -luser32"
++    CFLAGS="$CFLAGS -DMS_WINDOWS -DMS_WIN32"
++  ;&
++  x86_64-*-mingw*)
++    CFLAGS="$CFLAGS -DMS_WIN64";
++  ;;
++  *)
++  ;;
++esac
++
+ # ssl module default cipher suite string
+ AH_TEMPLATE([PY_SSL_DEFAULT_CIPHERS],
+   [Default cipher suites list for ssl module.
+@@ -7621,6 +7703,22 @@ AS_CASE([$ac_sys_system],
+       [syslog],
+     )
+   ],
++  dnl unpins: mingw (ac_sys_system pinned to 'ignore' by the mingw MACHDEP case).
++  dnl POSIX-only modules that cannot build on Windows (no fork/termios/etc).
++  [ignore], [
++    PY_STDLIB_MOD_SET_NA(
++      [readline],
++      [_posixshmem],
++      [_posixsubprocess],
++      [fcntl],
++      [grp],
++      [pwd],
++      [resource],
++      [syslog],
++      [termios],
++      [_scproxy],
++    )
++  ],
+   [CYGWIN*], [PY_STDLIB_MOD_SET_NA([_scproxy])],
+   [QNX*], [PY_STDLIB_MOD_SET_NA([_scproxy])],
+   [FreeBSD*], [PY_STDLIB_MOD_SET_NA([_scproxy])],
+@@ -7770,10 +7868,17 @@ PY_STDLIB_MOD_SIMPLE([_interpchannels])
+ PY_STDLIB_MOD_SIMPLE([_interpqueues])
+ PY_STDLIB_MOD_SIMPLE([_zoneinfo])
+ 
++dnl unpins: on mingw, _multiprocessing needs ws2_32 (winsock) and must build
++dnl unconditionally (sem_unlink is provided by winpthreads / the win32 impl).
++AS_CASE([$MACHDEP],
++  [win32], [MULTIPROCESSING_LIBS="-lws2_32"],
++  [MULTIPROCESSING_LIBS=""]
++)
++
+ dnl multiprocessing modules
+ PY_STDLIB_MOD([_multiprocessing],
+-  [], [test "$ac_cv_func_sem_unlink" = "yes"],
+-  [-I\$(srcdir)/Modules/_multiprocessing])
++  [], [test "$ac_cv_func_sem_unlink" = "yes" -o "$MACHDEP" = "win32"],
++  [-I\$(srcdir)/Modules/_multiprocessing], [$MULTIPROCESSING_LIBS])
+ PY_STDLIB_MOD([_posixshmem],
+   [], [test "$have_posix_shmem" = "yes"],
+   [$POSIXSHMEM_CFLAGS], [$POSIXSHMEM_LIBS])
+@@ -7791,7 +7896,9 @@ PY_STDLIB_MOD([fcntl],
+   [], [test "$ac_cv_header_sys_ioctl_h" = "yes" -a "$ac_cv_header_fcntl_h" = "yes"],
+   [], [$FCNTL_LIBS])
+ PY_STDLIB_MOD([mmap],
+-  [], [test "$ac_cv_header_sys_mman_h" = "yes" -a "$ac_cv_header_sys_stat_h" = "yes"])
++  [], m4_flatten([test "$ac_cv_header_sys_mman_h" = "yes"
++                    -a "$ac_cv_header_sys_stat_h" = "yes"
++                    -o "$MACHDEP" = "win32"]))
+ PY_STDLIB_MOD([_socket],
+   [], m4_flatten([test "$ac_cv_header_sys_socket_h" = "yes"
+                     -a "$ac_cv_header_sys_types_h" = "yes"
+@@ -7839,9 +7946,14 @@ PY_STDLIB_MOD([_blake2],
+   [test "$with_builtin_blake2" = yes], [],
+   [$LIBB2_CFLAGS], [$LIBB2_LIBS])
+ 
++dnl unpins: ctypes needs COM libs on mingw
++AS_CASE([$MACHDEP],
++  [win32], [CTYPES_LIBS="-lole32 -loleaut32 -luuid"],
++  [CTYPES_LIBS=""]
++)
+ PY_STDLIB_MOD([_ctypes],
+   [], [test "$have_libffi" = yes],
+-  [$NO_STRICT_OVERFLOW_CFLAGS $LIBFFI_CFLAGS], [$LIBFFI_LIBS])
++  [$NO_STRICT_OVERFLOW_CFLAGS $LIBFFI_CFLAGS], [$LIBFFI_LIBS $CTYPES_LIBS])
+ PY_STDLIB_MOD([_curses],
+   [], [test "$have_curses" = "yes"],
+   [$CURSES_CFLAGS], [$CURSES_LIBS]

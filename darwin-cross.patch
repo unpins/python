@@ -1,0 +1,32 @@
+--- a/configure
++++ b/configure
+@@ -4067,12 +4067,18 @@
+ 	*-*-wasi*)
+ 	    ac_sys_system=WASI
+ 	    ;;
++	*-apple-darwin*)
++		ac_sys_system=Darwin
++		;;
+ 	*)
+ 		# for now, limit cross builds to known configurations
+ 		MACHDEP="unknown"
+ 		as_fn_error $? "cross build not supported for $host" "$LINENO" 5
+ 	esac
+-	ac_sys_release=
++	case "$host" in
++	*-apple-darwin*) ac_sys_release=23.0.0 ;;
++	*) ac_sys_release= ;;
++	esac
+     else
+ 	ac_sys_system=`uname -s`
+ 	if test "$ac_sys_system" = "AIX" \
+@@ -4531,6 +4537,9 @@
+ 	wasm32-*-* | wasm64-*-*)
+ 		_host_ident=$host_cpu
+ 		;;
++	*-apple-darwin*)
++		_host_ident=$host_cpu
++		;;
+ 	*)
+ 		# for now, limit cross builds to known configurations
+ 		MACHDEP="unknown"
