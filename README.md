@@ -54,12 +54,11 @@ The [Releases](https://github.com/unpins/python/releases) page has standalone bi
 
 ## TLS / certificates
 
-HTTPS works out of the box with no `certifi`, no `SSL_CERT_FILE`, no system bundle required. The binary reads the platform's live trust roots — the macOS Keychain, the Windows ROOT store, or the system bundle on Linux — and falls back to an embedded Mozilla CA set when the platform store is empty or sparse. `SSL_CERT_FILE` / `SSL_CERT_DIR` still override when set.
+HTTPS works with no `certifi` and no `SSL_CERT_FILE`: the binary reads the platform's live trust roots (macOS Keychain, Windows ROOT store, or the Linux system bundle) and falls back to an embedded Mozilla CA set. `SSL_CERT_FILE` / `SSL_CERT_DIR` still override when set.
 
 ## Build notes
 
-- **Single binary, no data archive.** The standard library is packed into the executable as a ZIP and served from it via `zipimport`; the running executable is placed on `sys.path` at startup, so there is no companion `lib/python3.13/` tree, no `PYTHONPATH`, and no `/nix/store` references. Every C extension is compiled in as a builtin (`MODULE_BUILDTYPE=static`) and every dependency (zlib, OpenSSL, SQLite, libffi, expat, mpdecimal, ncurses/readline) is linked statically.
-- **Batteries included.** `ssl`/`hashlib` (static OpenSSL 3.x), `sqlite3`, `ctypes`, `curses`, `readline`, `zlib`/`bz2`/`lzma`, `decimal`, `_socket` with working timeouts — all present in the one file. Terminal capabilities for ~35 common terminals are baked in, so `curses`/`readline` render without `/usr/share/terminfo`.
-- **Packages go in a venv.** The embedded stdlib is read-only and has no `site-packages`, so `python -m pip` does not work against the binary itself. But `ensurepip` and its bundled pip wheel *are* embedded, so `python -m venv env` creates a normal virtual environment with a working `pip` — `env/bin/pip install <pkg>` then behaves exactly as usual. The binary is an interpreter you build environments against, not one you install into.
-- **macOS** is static-except-`libSystem` (macOS has no static libc); the only extra system frameworks are the public `Security` / `CoreFoundation` used for Keychain trust roots.
-- **Windows** is cross-built with mingw as a true single `.exe` (deps + gcc runtime folded in, imports only Windows system DLLs); native ROOT-store trust comes from `crypt32`.
+- **One file, no data archive.** The stdlib is a ZIP appended to the executable and served via `zipimport` (no `lib/python3.13/` tree, no `PYTHONPATH`, no `/nix/store` refs). Every C extension is a builtin and every dependency (OpenSSL, SQLite, libffi, ncurses/readline, …) is linked statically.
+- **Batteries included.** `ssl`/`hashlib`, `sqlite3`, `ctypes`, `curses`/`readline` (terminfo baked in), `zlib`/`bz2`/`lzma`, `decimal`, sockets with working timeouts.
+- **Packages go in a venv.** The embedded stdlib is read-only, so `python -m pip` won't install into the binary — but `ensurepip` + a bundled pip wheel are embedded, so `python -m venv env` gives a venv with a working `pip`.
+- **Platforms.** macOS is static-except-`libSystem` (Keychain trust via the public `Security`/`CoreFoundation` frameworks); Windows is a mingw single `.exe` importing only system DLLs (ROOT-store trust via `crypt32`).
