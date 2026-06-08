@@ -372,6 +372,9 @@ AC_CHECK_FUNCS([ \'
       inherit self;
       name = "python";
       pkgsAttr = "python3";
+      # Custom onefile build → no upstream meta.license to carry. CPython is
+      # under the PSF License (nixpkgs `psfl`, SPDX Python-2.0).
+      license = "Python-2.0";
 
       build = nativeBuild;
       windowsBuild = windowsBuild;
