@@ -1,13 +1,13 @@
 # python
 
-Standalone build of [CPython](https://www.python.org/) — the interpreter and its entire standard library in a single self-contained binary.
+[CPython](https://www.python.org/) — the interpreter and its entire standard library in a single self-contained binary, built natively for Linux, macOS, and Windows.
 
 [![CI](https://github.com/unpins/python/actions/workflows/python.yml/badge.svg)](https://github.com/unpins/python/actions)
 ![Linux](https://img.shields.io/badge/Linux-✓-success?logo=linux&logoColor=white)
 ![macOS](https://img.shields.io/badge/macOS-✓-success?logo=apple&logoColor=white)
 ![Windows](https://img.shields.io/badge/Windows-✓-success?logo=windows&logoColor=white)
 
-Part of the [unpins](https://unpins.org) project — native single-binary builds with no third-party runtime dependencies.
+Part of the [unpins](https://unpins.org) catalog; install it with [`unpin`](https://github.com/unpins/unpin): `unpin install python`.
 
 ## Usage
 
