@@ -375,6 +375,8 @@ AC_CHECK_FUNCS([ \'
       # Custom onefile build → no upstream meta.license to carry. CPython is
       # under the PSF License (nixpkgs `psfl`, SPDX Python-2.0).
       license = "Python-2.0";
+      # Custom onefile build → no upstream meta.description to carry either.
+      description = "CPython interpreter with the entire standard library embedded";
 
       build = nativeBuild;
       windowsBuild = windowsBuild;
