@@ -12,22 +12,25 @@
   # tree on disk, reached via sys.prefix. unpins ships ONE file: every C
   # extension is folded into the binary as a builtin (MODULE_BUILDTYPE=static),
   # every dependency (zlib/openssl/sqlite/…) is linked statically, and the
-  # pure-Python stdlib is packed to a ZIP and appended to the executable.
-  # zipimport tolerates the ELF/PE/Mach-O prefix, and a getpath patch prepends
-  # the running executable to sys.path, so the binary serves its own stdlib —
-  # no companion tree, no PYTHONPATH, no /nix/store refs. This is the Python
-  # analog of unpins/perl's @INC-in-the-binary VFS.
+  # pure-Python stdlib is packed to a zstd ZIP (ZIP method 93) and appended to
+  # the executable. zipimport tolerates the ELF/PE/Mach-O prefix; a patched
+  # zipimport inflates method 93 via the `_unpinzstd` builtin; and a getpath
+  # patch prepends the running executable to sys.path, so the binary serves its
+  # own stdlib — no companion tree, no PYTHONPATH, no /nix/store refs. This is
+  # the Python analog of unpins/perl's @INC-in-the-binary VFS.
   #
-  # Embed ordering (critical): `withMan`/`withAliases` each APPEND an overlay
-  # ZIP, and so does the stdlib. The unpin metadata reader unions `unpin/*`
-  # across every embedded ZIP, but Python's zipimport reads only the LAST
-  # End-Of-Central-Directory record. So the stdlib ZIP MUST be appended last:
-  #   [ELF/PE/Mach-O][aliases.zip][man.zip][stdlib.zip] + `zip -A`
-  # `zip -A` adjusts only the trailing (stdlib) archive's offsets; the man/
-  # aliases ZIPs sit in the opaque prefix, located by the reader via their own
-  # EOCDs. We therefore do man+aliases embedding ourselves INSIDE the build
-  # (so they land before the stdlib) and set `embedMan = false` to stop
-  # mkStandaloneFlake from appending a man ZIP after the stdlib.
+  # ONE embedded ZIP (the catalog norm since the container unification): because
+  # the patched zipimport reads zstd, the man pages, aliases, and the entire
+  # stdlib share a single zstd ZIP appended by one `withUnpinEmbed` call — the
+  # same machinery vim/perl/biber use. The stdlib lands at the ZIP root (where
+  # zipimport finds os.py, json/__init__.py, …); the `unpin/*` metadata sits
+  # alongside it (zipimport ignores it; the unpin-vfs reader serves `unpin man`).
+  #   [ELF/PE/Mach-O][ man + aliases + stdlib: one zstd ZIP ]
+  # The packer trains a shared `.unpin/zdict` dictionary over the tree (stored
+  # as a method-0 entry); the patched zipimport loads it to decode the dict-
+  # compressed stdlib frames, which buys the cross-file redundancy that per-file
+  # zstd cannot. `embedMan = false` (below) stops mkStandaloneFlake appending a
+  # SECOND man ZIP — man is already in the one ZIP here.
   outputs = { self, unpins-lib }:
     let
       ulib = unpins-lib.lib;
@@ -35,42 +38,36 @@
       pyMajor = "3.13";          # stdlib dir + frozen-getpath version
       aliasList = [ "python3" ]; # unversioned variants only; `python` is binName
 
-      # Shared stdlib staging + scrub + zip, then append to the (already
-      # man/alias-embedded) binary as the LAST overlay ZIP. `srcInterp` is the
-      # patched interpreter store path (carries lib/python${pyMajor}); `binPath`
-      # is the man/alias-embedded binary to append onto; `binName` the output
-      # file name (python / python.exe). Arch-agnostic: only .py shuffling +
-      # byte scrub, run by the build-host python.
-      appendStdlibSh = { srcInterp, scrubAgainst }: ''
-        # --- stage + scrub + zip the pure-Python stdlib ---
-        cp -r "${srcInterp}/lib/python${pyMajor}" stdlib
-        chmod -R u+w stdlib
+      # Stage + scrub the pure-Python stdlib into the embed ZIP root. Run as a
+      # `withUnpinEmbed` runtimeStage snippet, so `$__unpin_stage` is the ZIP
+      # root and the stdlib ends up in the SAME zstd ZIP as man + aliases (one
+      # pack, not a separately-appended archive). The patched zipimport finds
+      # os.py, json/__init__.py, … at the root. Arch-agnostic: only .py
+      # shuffling + byte scrub. `srcInterp` is the patched interpreter store
+      # path (carries lib/python${pyMajor}).
+      stdlibStageSh = { srcInterp }: ''
+        # --- stage the pure-Python stdlib at the ZIP root ($__unpin_stage) ---
+        cp -r "${srcInterp}/lib/python${pyMajor}/." "$__unpin_stage/"
+        chmod -R u+w "$__unpin_stage"
         # drop test suites, dev/build artifacts, pip's marker, idle/turtle demos
-        rm -rf stdlib/test stdlib/*/test stdlib/*/tests \
-               stdlib/idlelib stdlib/turtledemo stdlib/lib2to3/tests \
-               stdlib/config-${pyMajor}-* stdlib/site-packages stdlib/EXTERNALLY-MANAGED \
-               stdlib/ctypes/macholib/fetch_macholib*
-        find stdlib -name '__pycache__' -type d -prune -exec rm -rf {} +
+        rm -rf "$__unpin_stage"/test "$__unpin_stage"/*/test "$__unpin_stage"/*/tests \
+               "$__unpin_stage"/idlelib "$__unpin_stage"/turtledemo "$__unpin_stage"/lib2to3/tests \
+               "$__unpin_stage"/config-${pyMajor}-* "$__unpin_stage"/site-packages "$__unpin_stage"/EXTERNALLY-MANAGED \
+               "$__unpin_stage"/ctypes/macholib/fetch_macholib*
+        find "$__unpin_stage" -name '__pycache__' -type d -prune -exec rm -rf {} +
 
         # unpins: sitecustomize.py at the stdlib root is auto-imported by site.py
         # at startup; it feeds _unpinca's native trust roots (+ embedded Mozilla
         # fallback) into ssl's default context (cadata). No-op if _unpinca absent.
-        cp ${./sitecustomize.py} stdlib/sitecustomize.py
+        cp ${./sitecustomize.py} "$__unpin_stage/sitecustomize.py"
 
         # functional scrub: subprocess hard-codes a store bash as the shell=True
         # fallback; restore the POSIX default so it works anywhere.
         sed -i -E "s#/nix/store/[a-z0-9]{32}-bash[^\"']*/bin/sh#/bin/sh#g" \
-          stdlib/subprocess.py
+          "$__unpin_stage/subprocess.py"
         # blanket cosmetic scrub of any remaining store path in the .py tree
-        grep -rlZ '/nix/store/' stdlib --include='*.py' 2>/dev/null \
+        grep -rlZ '/nix/store/' "$__unpin_stage" --include='*.py' 2>/dev/null \
           | xargs -0 -r sed -i -E "s#/nix/store/[a-z0-9]{32}-[^ '\":]*#/unpin#g"
-
-        ( cd stdlib && zip -9 -X -q -r ../python-stdlib.zip . )
-
-        # --- append the stdlib ZIP LAST; zip -A fixes its offsets past the
-        #     binary + the man/alias overlay ZIPs that precede it ---
-        cat python-stdlib.zip >> "${scrubAgainst}"
-        zip -A "${scrubAgainst}" || true
       '';
 
       # getpath patches (shared linux/darwin/windows): (1) silence on-disk
@@ -96,6 +93,91 @@ pythonpath = config.get('module_search_paths')"
         pythonpath.append(_u)
 
     # First add entries from the process environment'
+      '';
+
+      # Wire the decode-only zstd amalgamation as the builtin `_unpinzstd`, so the
+      # single binary can inflate its zstd-packed stdlib (ZIP method 93) at
+      # bootstrap with no runtime libzstd. -DUNPIN_ZSTD_VENDORED folds
+      # zstddeclib.c into unpin_zstd.c as one TU (same shim the VFS packer uses);
+      # the glue is ~40 lines. Must be a builtin (not a sys.path extension):
+      # zipimport needs it to read the very zip extensions would load from, and
+      # the first imports (encodings/codecs/io) already come from that zip.
+      unpinzstdWireSh = ''
+        mkdir -p Modules/_unpinzstd
+        cp ${./unpinzstd/unpinzstd_module.c} Modules/_unpinzstd/unpinzstd_module.c
+        cp ${./unpinzstd/unpin_zstd.c}       Modules/_unpinzstd/unpin_zstd.c
+        cp ${./unpinzstd/unpin_zstd.h}       Modules/_unpinzstd/unpin_zstd.h
+        cp ${./unpinzstd/zstddeclib.c}       Modules/_unpinzstd/zstddeclib.c
+        # makesetup prepends Modules/ to source paths and resolves quoted includes
+        # next to the .c, so unpin_zstd.c finds unpin_zstd.h + zstddeclib.c. The
+        # -D applies to the whole module compile: only unpin_zstd.c reads it (to
+        # #include zstddeclib.c, decode-only); the glue ignores it.
+        printf '%s\n%s\n' '*static*' \
+          '_unpinzstd _unpinzstd/unpinzstd_module.c _unpinzstd/unpin_zstd.c -DUNPIN_ZSTD_VENDORED' \
+          >> Modules/Setup.local
+      '';
+
+      # Teach the frozen zipimport to inflate zstd (ZIP method 93): unpins packs
+      # the embedded stdlib as zstd, not deflate. Lib/zipimport.py is frozen into
+      # the binary (single-file build, no on-disk Lib/), so this edit must land
+      # before the freeze step regenerates Python/frozen_modules/zipimport.h —
+      # exactly like the getpath patch. The decode is the _unpinzstd builtin,
+      # fed the shared `.unpin/zdict` dictionary the packer trains for cross-file
+      # redundancy: that entry is STORED, so _unpin_get_zdict reads it through the
+      # plain compress==0 path (no dict, no recursion) and caches it per archive
+      # (the TOC is in _zip_directory_cache by the time any method-93 entry is
+      # read). Keys use path_sep (zipimport stores native separators). The lazy
+      # import mirrors _get_decompress_func so a stray _unpinzstd.py in some zip
+      # cannot recurse. Error strings avoid apostrophes to keep the
+      # substituteInPlace bash single-quoting clean.
+      zipimportPatchSh = ''
+        substituteInPlace Lib/zipimport.py --replace-fail \
+'def _get_data(archive, toc_entry):' \
+'_importing_unpinzstd = False
+_unpin_zdict_cache = {}
+def _unpin_get_zdict(archive):
+    try:
+        return _unpin_zdict_cache[archive]
+    except KeyError:
+        pass
+    d = None
+    try:
+        files = _zip_directory_cache.get(archive)
+        if files:
+            toc = files.get(".unpin" + path_sep + "zdict")
+            if toc is not None:
+                d = _get_data(archive, toc)
+    except Exception:
+        d = None
+    _unpin_zdict_cache[archive] = d
+    return d
+def _unpin_zstd_decompress(archive, raw_data, file_size):
+    global _importing_unpinzstd
+    if _importing_unpinzstd:
+        raise ZipImportError("cannot decompress data; _unpinzstd not available")
+    _importing_unpinzstd = True
+    try:
+        from _unpinzstd import decompress
+    except Exception:
+        raise ZipImportError("cannot decompress data; zstd not available")
+    finally:
+        _importing_unpinzstd = False
+    return decompress(raw_data, file_size, _unpin_get_zdict(archive))
+
+
+def _get_data(archive, toc_entry):'
+        substituteInPlace Lib/zipimport.py --replace-fail \
+'    if compress == 0:
+        # data is not compressed
+        return raw_data' \
+'    if compress == 0:
+        # data is not compressed
+        return raw_data
+
+    if compress == 93:
+        # unpins: zstd-compressed (ZIP method 93), decoded by builtin _unpinzstd,
+        # feeding the shared .unpin/zdict dictionary when present.
+        return _unpin_zstd_decompress(archive, raw_data, file_size)'
       '';
 
       # Windows-only configure.ac / source guards. The multiline --replace-fail
@@ -228,7 +310,9 @@ AC_CHECK_FUNCS([ \'
                   cacert = pkgs.buildPackages.cacert;
                   extraLibs = unpincaLibs;
                 }
-              + getpathPatchSh;
+              + getpathPatchSh
+              + unpinzstdWireSh
+              + zipimportPatchSh;
           });
 
           # Step 1: scrubbed binary named `python` (+ its man for withMan), NO
@@ -254,25 +338,19 @@ AC_CHECK_FUNCS([ \'
             dontStrip = true;
           };
 
-          withMeta = ulib.withMan pkgs { primary = "python"; }
-            (ulib.withAliases pkgs { primary = "python"; aliases = aliasList; } base);
         in
-        # Step 2: append the stdlib ZIP last → single self-contained binary.
-        sp.stdenvNoCC.mkDerivation {
+        # Step 2: one withUnpinEmbed call folds man + aliases + the zstd-packed
+        # stdlib into the binary's single ZIP → self-contained binary.
+        (ulib.withUnpinEmbed pkgs {
+          primary = "python";
+          man = true;
+          aliases = aliasList;
+          runtimeStage = stdlibStageSh { srcInterp = interp; };
+        } base).overrideAttrs (old: {
           name = "python-onefile-${suffix}";
-          dontUnpack = true;
-          nativeBuildInputs = [ pkgs.buildPackages.zip pkgs.buildPackages.python3 ];
-          buildPhase = ''
-            runHook preBuild
-            mkdir -p $out/bin
-            cp "${withMeta}/bin/python" $out/bin/python
-            chmod +w $out/bin/python
-            ${appendStdlibSh { srcInterp = interp; scrubAgainst = "$out/bin/python"; }}
-            runHook postBuild
-          '';
-          dontStrip = true;
-          passthru = { inherit interp; pname = "python"; inherit (interp) version; };
-        };
+          passthru = (old.passthru or { })
+            // { inherit interp; pname = "python"; inherit (interp) version; };
+        });
 
       # ===================== Windows (mingw cross, x86_64) =====================
       # `pkgs` is windowsPkgs (x86_64-linux + cosmo overlay + allowUnsupportedSystem).
@@ -316,6 +394,8 @@ AC_CHECK_FUNCS([ \'
                   extraLibs = " -lcrypt32";
                 }
               + getpathPatchSh
+              + unpinzstdWireSh
+              + zipimportPatchSh
               + windowsConfigurePatchSh;
             postInstall = ''
               # nixpkgs' (!static)-guarded postInstall touches test/__init__.py;
@@ -348,25 +428,19 @@ AC_CHECK_FUNCS([ \'
             dontStrip = true;
           };
 
-          # withMan/withAliases resolve `<primary>.exe` automatically.
-          withMeta = ulib.withMan pkgs { primary = "python"; }
-            (ulib.withAliases pkgs { primary = "python"; aliases = aliasList; } base);
         in
-        pkgs.stdenvNoCC.mkDerivation {
+        # One withUnpinEmbed call: man + aliases + zstd stdlib in the binary's
+        # single ZIP. withUnpinEmbed resolves `<primary>.exe` automatically.
+        (ulib.withUnpinEmbed pkgs {
+          primary = "python";
+          man = true;
+          aliases = aliasList;
+          runtimeStage = stdlibStageSh { srcInterp = windowsPython; };
+        } base).overrideAttrs (old: {
           name = "python-onefile-windows";
-          dontUnpack = true;
-          nativeBuildInputs = [ pkgs.buildPackages.zip pkgs.buildPackages.python3 ];
-          buildPhase = ''
-            runHook preBuild
-            mkdir -p $out/bin
-            cp "${withMeta}/bin/python.exe" $out/bin/python.exe
-            chmod +w $out/bin/python.exe
-            ${appendStdlibSh { srcInterp = windowsPython; scrubAgainst = "$out/bin/python.exe"; }}
-            runHook postBuild
-          '';
-          dontStrip = true;
-          passthru = { pname = "python"; inherit (windowsPython) version; };
-        };
+          passthru = (old.passthru or { })
+            // { pname = "python"; inherit (windowsPython) version; };
+        });
     in
     ulib.mkStandaloneFlake {
       inherit self;
