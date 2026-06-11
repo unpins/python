@@ -1,5 +1,5 @@
 {
-  description = "Standalone build of CPython (single self-contained binary, stdlib embedded)";
+  description = "CPython — interpreter and full stdlib in one self-contained binary";
 
   nixConfig = {
     extra-substituters = [ "https://unpins.cachix.org" ];
