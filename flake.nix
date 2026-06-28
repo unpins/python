@@ -339,18 +339,22 @@ AC_CHECK_FUNCS([ \'
           };
 
         in
-        # Step 2: one withUnpinEmbed call folds man + aliases + the zstd-packed
-        # stdlib into the binary's single ZIP → self-contained binary.
-        (ulib.withUnpinEmbed pkgs {
-          primary = "python";
-          man = true;
-          aliases = aliasList;
-          runtimeStage = stdlibStageSh { srcInterp = interp; };
-        } base).overrideAttrs (old: {
-          name = "python-onefile-${suffix}";
-          passthru = (old.passthru or { })
-            // { inherit interp; pname = "python"; inherit (interp) version; };
-        });
+        # The PRISTINE scrubbed interpreter base + the embed spec (man + aliases +
+        # zstd-packed stdlib). The embed runs once, post-build, via runtimeEmbed →
+        # unpinEmbedWrap (the single embed path; man = true overrides embedMan =
+        # false). carries `interp`/version passthru for the framework.
+        {
+          base = base.overrideAttrs (old: {
+            name = "python-onefile-${suffix}";
+            passthru = (old.passthru or { })
+              // { inherit interp; pname = "python"; inherit (interp) version; };
+          });
+          embed = {
+            man = true;
+            aliases = aliasList;
+            runtimeStage = stdlibStageSh { srcInterp = interp; };
+          };
+        };
 
       # ===================== Windows (mingw cross, x86_64) =====================
       # `pkgs` is windowsPkgs (x86_64-linux + cosmo overlay + allowUnsupportedSystem).
@@ -429,18 +433,20 @@ AC_CHECK_FUNCS([ \'
           };
 
         in
-        # One withUnpinEmbed call: man + aliases + zstd stdlib in the binary's
-        # single ZIP. withUnpinEmbed resolves `<primary>.exe` automatically.
-        (ulib.withUnpinEmbed pkgs {
-          primary = "python";
-          man = true;
-          aliases = aliasList;
-          runtimeStage = stdlibStageSh { srcInterp = windowsPython; };
-        } base).overrideAttrs (old: {
-          name = "python-onefile-windows";
-          passthru = (old.passthru or { })
-            // { pname = "python"; inherit (windowsPython) version; };
-        });
+        # The PRISTINE scrubbed interpreter base + the embed spec; resolves
+        # `python.exe` automatically. Embedded post-build via runtimeEmbed.windows.
+        {
+          base = base.overrideAttrs (old: {
+            name = "python-onefile-windows";
+            passthru = (old.passthru or { })
+              // { pname = "python"; inherit (windowsPython) version; };
+          });
+          embed = {
+            man = true;
+            aliases = aliasList;
+            runtimeStage = stdlibStageSh { srcInterp = windowsPython; };
+          };
+        };
     in
     ulib.mkStandaloneFlake {
       inherit self;
@@ -452,12 +458,16 @@ AC_CHECK_FUNCS([ \'
       # Custom onefile build → no upstream meta.description to carry either.
       description = "CPython interpreter with the entire standard library embedded";
 
-      build = nativeBuild;
-      windowsBuild = windowsBuild;
+      build = pkgs: (nativeBuild pkgs).base;
+      windowsBuild = pkgs: (windowsBuild pkgs).base;
+      runtimeEmbed = {
+        native = pkgs: _base: (nativeBuild pkgs).embed;
+        windows = pkgs: _base: (windowsBuild pkgs).embed;
+      };
 
-      # Man + aliases are embedded INSIDE the build (before the stdlib ZIP), so
-      # disable the post-build man append that would land a ZIP after the stdlib
-      # and shadow it from zipimport.
+      # Man + aliases are embedded INSIDE the single ZIP (before the stdlib), so
+      # disable the auto man-harvest; runtimeEmbed sets man = true explicitly so
+      # everything still lands in ONE pack ahead of the stdlib.
       embedMan = false;
 
       # darwin static is static-except-libSystem (no static libc on macOS); the
