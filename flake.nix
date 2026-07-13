@@ -267,11 +267,58 @@ AC_CHECK_FUNCS([ \'
           unpincaLibs = lib.optionalString isDarwin
             " -framework Security -framework CoreFoundation";
 
+          # sqlite 3.51.2 runs TCL codegen and compiles build-side helper tools
+          # (mksourceid/src-verify) DURING its build — both fight the darwin
+          # engine, which cannot link a runnable build-host Mach-O executable
+          # (the engine cc is crt-less; the plain darwin cc, run inside the
+          # engine build env, links through the engine's ELF `ld` shadowing
+          # ld64). Linux is unaffected: its build tools are static-musl and run
+          # fine, so this whole override is darwin-gated (plain sp.sqlite on
+          # linux stays byte-identical). On darwin, four build-only levers, none
+          # touching the shipped library (which stays engine bitcode via
+          # T.cc = $(CC)):
+          #   * --with-tclsh → use the pristine host tclsh for codegen, skipping
+          #     the bundled-jimsh build (autosetup returns before its realpath
+          #     probe, which would itself hit the linker problem);
+          #   * TCLSH_CMD (make-time) → nixpkgs also passes --disable-tcl for
+          #     static, which makes sqlite-check-tcl leave TCLSH_CMD=false, so
+          #     --with-tclsh alone only clears the configure FATAL — this
+          #     supplies the real interpreter to the codegen rule;
+          #   * CC_FOR_BUILD → pin B.cc to the plain darwin cc (autosetup would
+          #     otherwise force it to the crt-less engine CC on a native build);
+          #   * BUILD_CFLAGS -fuse-ld=<cctools ld64> → force the helper-tool link
+          #     onto darwin's ld64, bypassing the engine ELF `ld` that shadows it
+          #     in the build env (the "neither ET_REL nor LLVM bitcode" failure).
+          sqliteBuildCc =
+            if !isDarwin then sp.sqlite
+            else
+              let
+                tclsh = "${pkgs.buildPackages.tcl}/bin/tclsh";
+                buildCc = "${pkgs.buildPackages.stdenv.cc}/bin/cc";
+                ld64 = "${pkgs.buildPackages.stdenv.cc.bintools.bintools}/bin/ld";
+              in
+              sp.sqlite.overrideAttrs (o: {
+                env = (o.env or { }) // {
+                  CC_FOR_BUILD = buildCc;
+                  BUILD_CFLAGS = "-g -fuse-ld=${ld64}";
+                };
+                configureFlags = (o.configureFlags or [ ]) ++ [ "--with-tclsh=${tclsh}" ];
+                makeFlags = (o.makeFlags or [ ]) ++ [ "TCLSH_CMD=${tclsh}" ];
+              });
+
           # The patched, fully static interpreter (all C-ext builtin, every dep
           # folded in, getpath serving the embedded stdlib).
           interp = (sp.python3.override {
             ncurses = ncursesFB;
             readline = sp.readline.override { ncurses = ncursesFB; };
+            sqlite = sqliteBuildCc;
+            # The engine already does whole-program LTO (every object is bitcode,
+            # lld does the final link). CPython's own `--with-lto` is redundant and
+            # its configure demands a standalone `llvm-ar` binary the engine cc
+            # doesn't expose (it ships the `llvm` multitool). Turn it off; the
+            # engine link is unchanged. enableLTO defaults on for 64-bit
+            # linux/darwin, so this matters on every native target.
+            enableLTO = false;
           }).overrideAttrs (old: {
             # darwin has no static libc, so a full `-static` link fails
             # configure's "C compiler cannot create executables" (why nixpkgs
@@ -283,7 +330,19 @@ AC_CHECK_FUNCS([ \'
             configureFlags =
               if isDarwin
               then builtins.filter (f: f != "LDFLAGS=-static") (old.configureFlags or [ ])
-              else (old.configureFlags or [ ]);
+              else
+                # gdbm's off_map_lookup references malloc late in the link; the
+                # engine's whole-program LTO internalizes musl's WEAK `malloc`
+                # alias on some arches (riscv64/ppc64le drop it, x86_64/i686
+                # keep it) → `ld.lld: undefined symbol: malloc`. Force-keep it —
+                # the per-package analog of nix-lib's mega `bitcodeLibcForce`.
+                # `-u malloc` is a no-op where malloc is already retained, so
+                # x86_64/i686 stay byte-identical. Rides the existing
+                # LDFLAGS=-static → straight to the final CPython link.
+                map (f: if f == "LDFLAGS=-static"
+                        then "LDFLAGS=-static -Wl,-u,malloc"
+                        else f)
+                  (old.configureFlags or [ ]);
             meta = (old.meta or { }) // { broken = false; };
             # CPython's configure refuses to cross-compile to darwin: the
             # cross `case "$host"` arms cover linux/cygwin/ios/wasi/… but not
@@ -452,6 +511,12 @@ AC_CHECK_FUNCS([ \'
       inherit self;
       name = "python";
       pkgsAttr = "python3";
+      # Build every C extension + dep closure through the unpin-llvm engine
+      # (all objects LLVM bitcode, whole-program LTO). `build`/`windowsBuild`
+      # receive an engine-swapped pkgs whose `pkgsStatic` is the bitcode set, so
+      # `sp = pkgs.pkgsStatic` in nativeBuild folds the interpreter under the
+      # engine automatically. Windows (mingw, off-engine) is unaffected.
+      engine = "unpin-llvm";
       # Custom onefile build → no upstream meta.license to carry. CPython is
       # under the PSF License (nixpkgs `psfl`, SPDX Python-2.0).
       license = "Python-2.0";
