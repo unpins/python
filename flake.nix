@@ -425,7 +425,18 @@ AC_CHECK_FUNCS([ \'
           # key off isStatic and emit .a-only, so every dep (zlib/bz2/xz/expat/
           # libffi/mpdecimal/openssl/sqlite/ncurses/gcc-runtime) folds into
           # python.exe — no per-dep overrides, triple stays x86_64-w64-mingw32.
-          crossW64 = ulib.mingwStaticCross pkgs;
+          # OPENSSLDIR/ENGINESDIR/MODULESDIR default to openssl's own $out, so
+          # python.exe carried a live reference to
+          # `openssl-…-w64-mingw32-…-etc` -- the directory libcrypto reads the CA
+          # trust store from, which `ssl`/`urllib`/`pip` all depend on. The
+          # retarget is set-wide ONLY in the engine's native scope
+          # (nix-lib/native-overlay/openssl.nix); the mingw scope has none, and
+          # openssl/flake.nix:57 covers just the openssl PACKAGE's own .exe.
+          # C:/ssl is the value that package uses; unpins/opus-tools and
+          # unpins/php needed the same.
+          crossW64 = (ulib.mingwStaticCross pkgs).extend (final: prev: {
+            openssl = prev.openssl.overrideAttrs (ulib.retargetOpenssl "C:/ssl");
+          });
           isFedoraMingwPatch = p: lib.hasInfix "mingw-python" (toString p);
 
           windowsPython = (crossW64.python3.override {
