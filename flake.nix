@@ -56,11 +56,6 @@
                "$__unpin_stage"/ctypes/macholib/fetch_macholib*
         find "$__unpin_stage" -name '__pycache__' -type d -prune -exec rm -rf {} +
 
-        # unpins: sitecustomize.py at the stdlib root is auto-imported by site.py
-        # at startup; it feeds _unpinca's native trust roots (+ embedded Mozilla
-        # fallback) into ssl's default context (cadata). No-op if _unpinca absent.
-        cp ${./sitecustomize.py} "$__unpin_stage/sitecustomize.py"
-
         # functional scrub: subprocess hard-codes a store bash as the shell=True
         # fallback; restore the POSIX default so it works anywhere.
         sed -i -E "s#/nix/store/[a-z0-9]{32}-bash[^\"']*/bin/sh#/bin/sh#g" \
@@ -178,6 +173,377 @@ def _get_data(archive, toc_entry):'
         # unpins: zstd-compressed (ZIP method 93), decoded by builtin _unpinzstd,
         # feeding the shared .unpin/zdict dictionary when present.
         return _unpin_zstd_decompress(archive, raw_data, file_size)'
+      '';
+
+      # Teach `zipfile` the same zstd (ZIP method 93) the zipimport patch above
+      # teaches the importer. They are NOT the same reader, and that asymmetry
+      # was a real hole: zipimport serves `.py` modules, but every NON-.py
+      # resource -- the bundled pip wheel, the venv activate scripts, the pydoc
+      # CSS, the embedded man pages -- is read through `zipfile`, which
+      # `importlib.resources` sits on top of. Without this, 566 of the archive's
+      # 618 members raise NotImplementedError("That compression method is not
+      # supported") the moment anything reaches for them by name, and
+      # `python -m venv` fails outright because ensurepip cannot read its own
+      # wheel. The write path is deliberately left alone (see below).
+      zipfilePatchSh = ''
+        substituteInPlace Lib/zipfile/__init__.py --replace-fail \
+'def _check_compression(compression):' \
+'UNPIN_ZIP_ZSTD = 93
+_unpin_zdict_cache = {}
+
+
+def _unpin_zdict_for(archive):
+    # unpins: the packer trains ONE zstd dictionary per archive and stores it
+    # as the STORED member ".unpin/zdict"; frames compressed against it cannot
+    # be decoded without it. Reading it opens a second, independent ZipFile on
+    # the same path -- a STORED member needs no decompressor, so this cannot
+    # recurse back into here.
+    try:
+        return _unpin_zdict_cache[archive]
+    except KeyError:
+        pass
+    d = None
+    if archive:
+        try:
+            with ZipFile(archive) as zf:
+                d = zf.read(".unpin/zdict")
+        except Exception:
+            d = None
+    _unpin_zdict_cache[archive] = d
+    return d
+
+
+class _UnpinZstdDecompressor:
+    """unpins: decode ZIP method 93 (zstd) through the builtin _unpinzstd.
+
+    The unpins packer writes one zstd frame per member, so there is nothing to
+    stream: buffer the compressed bytes and decode once the last one arrives.
+    ZipExtFile only requires .decompress(data) plus .eof -- the same contract
+    the LZMADecompressor wrapper above satisfies.
+    """
+
+    def __init__(self, zdict=None, compress_size=0, file_size=0):
+        self._zdict = zdict
+        self._compress_size = compress_size
+        self._file_size = file_size
+        self._buf = b""
+        self.eof = False
+
+    def decompress(self, data):
+        self._buf += data
+        if len(self._buf) < self._compress_size:
+            return b""
+        try:
+            from _unpinzstd import decompress as _unpin_decompress
+        except ImportError:
+            raise NotImplementedError(
+                "compression type 93 (zstd) needs the _unpinzstd builtin")
+        out = _unpin_decompress(self._buf, self._file_size, self._zdict)
+        self._buf = b""
+        self.eof = True
+        return out
+
+
+def _check_compression(compression):'
+        substituteInPlace Lib/zipfile/__init__.py --replace-fail \
+'def _get_decompressor(compress_type):
+    _check_compression(compress_type)' \
+'def _get_decompressor(compress_type, zdict=None, compress_size=0, file_size=0):
+    if compress_type == UNPIN_ZIP_ZSTD:
+        # unpins: answered BEFORE _check_compression on purpose, so the WRITE
+        # path (_get_compressor, ZipFile(mode=w, compression=93)) keeps
+        # rejecting method 93 instead of silently storing data uncompressed.
+        return _UnpinZstdDecompressor(zdict, compress_size, file_size)
+    _check_compression(compress_type)'
+        substituteInPlace Lib/zipfile/__init__.py --replace-fail \
+'        self._compress_type = zipinfo.compress_type
+        self._compress_left = zipinfo.compress_size
+        self._left = zipinfo.file_size
+
+        self._decompressor = _get_decompressor(self._compress_type)' \
+'        self._compress_type = zipinfo.compress_type
+        self._compress_left = zipinfo.compress_size
+        self._left = zipinfo.file_size
+
+        # unpins: method 93 needs the archive shared dictionary. Reach the
+        # backing path through the _SharedFile wrapper; an archive opened from
+        # a bare file object has no name, and then only dict-less frames decode.
+        self._unpin_zdict = None
+        if self._compress_type == UNPIN_ZIP_ZSTD:
+            self._unpin_zdict = _unpin_zdict_for(
+                getattr(getattr(fileobj, "_file", None), "name", None))
+
+        self._decompressor = _get_decompressor(
+            self._compress_type, self._unpin_zdict,
+            zipinfo.compress_size, zipinfo.file_size)'
+        substituteInPlace Lib/zipfile/__init__.py --replace-fail \
+'            self._decompressor = _get_decompressor(self._compress_type)
+            self._eof = False' \
+'            self._decompressor = _get_decompressor(
+                self._compress_type, self._unpin_zdict,
+                self._orig_compress_size, self._orig_file_size)
+            self._eof = False'
+      '';
+
+      # `venv` installs its activate scripts by walking `venv/scripts` on disk.
+      # With the stdlib embedded there IS no such directory, so os.walk() yields
+      # nothing, the loop body never runs, and every venv came out with no
+      # activate script at all -- no error, exit status 0. Install the same
+      # members out of the archive instead. Independent of the zipfile patch
+      # above (os.walk is filesystem-only, whatever the compression), but it
+      # reads through `zipfile`, so both are needed for a venv to be complete.
+      venvPatchSh = ''
+        substituteInPlace Lib/venv/__init__.py --replace-fail \
+'    def install_scripts(self, context, path):' \
+'    def _unpin_install_scripts_from_zip(self, context, path):
+        # unpins: install_scripts() for an embedded (zipimport) stdlib. Mirrors
+        # the os.walk() loop below -- only the "common" and os.name
+        # directories, same destination layout, same variable substitution --
+        # but reads the members from the ZIP appended to the executable.
+        import zipfile
+        archive = getattr(globals().get("__loader__"), "archive", None)
+        if not archive:
+            return
+        prefix = path[len(archive):].strip("/" + os.sep).replace(os.sep, "/")
+        binpath = context.bin_path
+        with zipfile.ZipFile(archive) as zf:
+            for name in zf.namelist():
+                if name.endswith("/") or not name.startswith(prefix + "/"):
+                    continue
+                parts = name[len(prefix) + 1:].split("/")
+                if len(parts) < 2 or parts[0] not in ("common", os.name):
+                    continue
+                dstdir = os.path.join(binpath, *parts[1:-1])
+                os.makedirs(dstdir, exist_ok=True)
+                dstfile = os.path.join(dstdir, parts[-1])
+                data = zf.read(name)
+                try:
+                    context.script_path = name
+                    new_data = (
+                        self.replace_variables(data.decode("utf-8"), context)
+                            .encode("utf-8")
+                    )
+                except UnicodeError as e:
+                    logger.warning("unable to copy script %r, "
+                                   "may be binary: %s", name, e)
+                    continue
+                with open(dstfile, "wb") as f:
+                    f.write(new_data)
+                os.chmod(dstfile, 0o644)
+
+    def install_scripts(self, context, path):'
+        substituteInPlace Lib/venv/__init__.py --replace-fail \
+'            if do_copies:
+                for dest, src in copy_sources.items():' \
+'            # unpins: CPython ships venvlauncher.exe / venvwlauncher.exe with
+            # its Windows INSTALLER, and venv copies them into the new
+            # environment. A mingw cross build produces neither, and the
+            # directory they are looked up in lives inside the ZIP appended to
+            # the executable, so every copy failed, Scripts\\python.exe was never
+            # created, and the environment was unusable -- the only sign being
+            # two "Unable to copy" warnings on the way past. Fall back to the
+            # interpreter itself, which is the right answer for a single-file
+            # build anyway: the environment is defined by the pyvenv.cfg next to
+            # the executable, and our binary carries its own stdlib wherever it
+            # is copied. The pythonw names are dropped: this is a console build,
+            # and a second 29 MB copy would buy nothing.
+            if not any(os.path.exists(src) for src in copy_sources.values()):
+                copy_sources = {
+                    dest: context.executable for dest in copy_sources
+                    if not os.path.normcase(dest).startswith("pythonw")
+                }
+
+            if do_copies:
+                for dest, src in copy_sources.items():'
+        substituteInPlace Lib/venv/__init__.py --replace-fail \
+'        binpath = context.bin_path
+        plen = len(path)' \
+'        if not os.path.isdir(path):
+            # unpins: the stdlib is a ZIP appended to the executable, so
+            # venv/scripts is not a directory and the os.walk() below finds
+            # nothing -- leaving every venv without its activate scripts,
+            # silently and with a zero exit status.
+            self._unpin_install_scripts_from_zip(context, path)
+            return
+
+        binpath = context.bin_path
+        plen = len(path)'
+      '';
+
+      # `import ctypes` died outright on the fully static Linux build: the
+      # module ends its setup with `pythonapi = PyDLL(None)`, and dlopen(NULL)
+      # in static musl always fails, so the OSError escaped and took the whole
+      # module with it -- 1 of only 4 stdlib top-level modules that would not
+      # import (the other 3 are tkinter/turtle/_ios_support, none of them
+      # promised). That is a limit on LOADING shared libraries, which a static
+      # binary genuinely cannot do; it is NOT a reason to lose the half of
+      # ctypes that is pure computation (Structure, c_int, CFUNCTYPE, sizeof,
+      # memmove, cast), which plenty of code uses without ever opening a
+      # library. Worse, the failure was an OSError, which code probing for
+      # ctypes behind `except ImportError` does not catch -- so an optional
+      # dependency turned into a hard crash. Keep the import alive and move the
+      # error to the point of use, with a message that says what is going on.
+      # Inert everywhere else: Windows takes the `nt` branch and darwin links
+      # libSystem dynamically, so dlopen(NULL) succeeds and the except never
+      # fires. The `else:`/`if` anchors sit at column 0, hence the flush-left
+      # body (the col-0 trick, same as windowsConfigurePatchSh below).
+      ctypesPatchSh = ''
+        substituteInPlace Lib/ctypes/__init__.py --replace-fail \
+'else:
+    pythonapi = PyDLL(None)' \
+'else:
+    try:
+        pythonapi = PyDLL(None)
+    except OSError:
+        # unpins: static build -- no dynamic loader, so there is no handle to
+        # the running program. Defer the error to whoever actually asks.
+        class _UnpinNoDynamicLoader:
+            def __getattr__(self, name):
+                raise OSError(
+                    "ctypes.pythonapi is unavailable: this is a statically "
+                    "linked build with no dynamic loader")
+
+        pythonapi = _UnpinNoDynamicLoader()'
+      '';
+
+      # `importlib.resources.as_file()` threw away the resource NAME. For a
+      # member of a real directory `as_file` hands back the file itself, but
+      # for one inside a ZIP it has to materialise a copy, and it did that with
+      # `mkstemp(suffix=path.name)` -- so the bundled pip wheel arrived as
+      # `tmpljoqmi3vpip-26.0.1-py3-none-any.whl`. Every consumer that parses a
+      # name back into meaning then reads the wrong thing: `ensurepip.version()`
+      # answered `tmptest0g_cpip`, and pip, handed `--find-links` on that
+      # directory, saw a distribution called `tmpljoqmi3vpip` and reported
+      # `No matching distribution found for pip` -- which is what actually made
+      # `python -m venv` fail, even once zipfile could read the member. A
+      # private directory gives the same collision safety with the name intact.
+      # Only reached for non-filesystem resources (as_file dispatches real
+      # paths to themselves), i.e. exactly the embedded-stdlib case.
+      resourcesPatchSh = ''
+        substituteInPlace Lib/importlib/resources/_common.py --replace-fail \
+'def _temp_file(path):
+    return _tempfile(path.read_bytes, suffix=path.name)' \
+'@contextlib.contextmanager
+def _unpin_named_tempfile(
+    reader,
+    name,
+    # gh-93353: keep references for late Python finalization, as _tempfile does.
+    *,
+    _os_remove=os.remove,
+    _os_rmdir=os.rmdir,
+):
+    # unpins: materialise the resource under its REAL name inside a private
+    # directory, instead of mkstemp(suffix=name) which prepends tmpXXXXXX.
+    d = tempfile.mkdtemp()
+    raw_path = os.path.join(d, name)
+    try:
+        with open(raw_path, "wb") as f:
+            f.write(reader())
+        del reader
+        yield pathlib.Path(raw_path)
+    finally:
+        try:
+            _os_remove(raw_path)
+        except FileNotFoundError:
+            pass
+        try:
+            _os_rmdir(d)
+        except OSError:
+            pass
+
+
+def _temp_file(path):
+    name = os.path.basename(path.name or "")
+    if not name or name in (os.curdir, os.pardir):
+        return _tempfile(path.read_bytes, suffix=path.name)
+    return _unpin_named_tempfile(path.read_bytes, name)'
+      '';
+
+      # Wire libunpinca into `ssl` itself, so a `python` that never opens a TLS
+      # connection never pays for it. This used to live in a `sitecustomize.py`
+      # at the stdlib root, which site.py imports at EVERY interpreter startup:
+      # it pulled in `re` and `ssl` eagerly and cost **291 ms of a 358 ms
+      # `python -c pass`** -- the same run takes 47 ms with `-S`. Startup is
+      # most of what a CLI interpreter does, and nothing about feeding trust
+      # roots to `ssl` has to happen before `ssl` exists. The roots are now
+      # computed lazily, on the first context that actually asks for defaults,
+      # and the PEM scan uses str.find instead of `re` so nothing drags that
+      # module in either.
+      sslPatchSh = ''
+        substituteInPlace Lib/ssl.py --replace-fail \
+'    def load_default_certs(self, purpose=Purpose.SERVER_AUTH):
+        if not isinstance(purpose, _ASN1Object):
+            raise TypeError(purpose)
+        if sys.platform == "win32":
+            for storename in self._windows_cert_stores:
+                self._load_windows_store_certs(storename, purpose)
+        self.set_default_verify_paths()' \
+'    # unpins: False = not computed yet, None = no native roots available.
+    _unpin_pem = False
+
+    def _unpin_default_pem(self):
+        # unpins: the platform live trust roots (macOS Keychain, Windows ROOT
+        # store, Linux system bundle) plus the embedded Mozilla fallback, from
+        # the builtin _unpinca. Computed once, on the first context that asks.
+        if SSLContext._unpin_pem is not False:
+            return SSLContext._unpin_pem
+        SSLContext._unpin_pem = None
+        try:
+            import _unpinca
+            if sys.platform == "win32":
+                # Windows ships few roots and fetches the rest on demand via
+                # Automatic Root Update, which OpenSSL never triggers -- and a
+                # sparse but non-empty store would suppress the fallback. Union
+                # the live store (it honours enterprise roots) with the
+                # fallback so public sites verify either way.
+                parts = []
+                native = _unpinca.native_pem()
+                if native:
+                    parts.append(native)
+                parts.append(_unpinca.fallback_pem())
+                src = "\n".join(parts)
+            else:
+                # SSL_CERT_FILE / SSL_CERT_DIR precedence lives inside
+                # libunpinca: when either is set the env wins and the platform
+                # store is skipped, so this already reflects the override.
+                src = _unpinca.roots_pem()
+        except Exception:
+            return None
+        # load_verify_locations(cadata=str) demands pure ASCII, and CA bundles
+        # carry non-ASCII friendly-name labels between the blocks. Keep only
+        # the base64 blocks, which are ASCII by definition.
+        blocks = []
+        begin = "-----BEGIN CERTIFICATE-----"
+        end = "-----END CERTIFICATE-----"
+        i = 0
+        while True:
+            a = src.find(begin, i)
+            if a < 0:
+                break
+            b = src.find(end, a)
+            if b < 0:
+                break
+            b += len(end)
+            blocks.append(src[a:b])
+            i = b
+        if blocks:
+            SSLContext._unpin_pem = "\n".join(blocks) + "\n"
+        return SSLContext._unpin_pem
+
+    def load_default_certs(self, purpose=Purpose.SERVER_AUTH):
+        if not isinstance(purpose, _ASN1Object):
+            raise TypeError(purpose)
+        pem = self._unpin_default_pem()
+        if pem:
+            try:
+                self.load_verify_locations(cadata=pem)
+                return
+            except Exception:
+                pass
+        if sys.platform == "win32":
+            for storename in self._windows_cert_stores:
+                self._load_windows_store_certs(storename, purpose)
+        self.set_default_verify_paths()'
       '';
 
       # Windows-only configure.ac / source guards. The multiline --replace-fail
@@ -371,8 +737,39 @@ AC_CHECK_FUNCS([ \'
                 }
               + getpathPatchSh
               + unpinzstdWireSh
-              + zipimportPatchSh;
+              + zipimportPatchSh
+              + zipfilePatchSh
+              + venvPatchSh
+              + ctypesPatchSh
+              + resourcesPatchSh
+              + sslPatchSh;
           });
+
+          # nix-lib's `dnsFallback` option is INERT for this package, and
+          # silently so: it appends link flags to the derivation nix-lib builds,
+          # and ours links nothing at all -- it copies an interpreter that
+          # `sp.python3` already linked, one derivation earlier. Setting the
+          # option changed nothing in the binary (no UNPIN_DNS string, no
+          # __wrap_getaddrinfo) on the pinned nix-lib AND on HEAD, while curl,
+          # also on the engine, carries both. So apply the interposition where
+          # the link is, with the flags withDnsFallback itself uses.
+          #
+          # Why an interpreter wants it: socket, urllib, and everything a user
+          # installs into a venv resolve names through this binary, and a static
+          # musl build has no NSS -- on a host whose /etc/resolv.conf is missing
+          # or unreachable (containers, Android, rescue shells) every lookup is
+          # a dead `socket.gaierror: [Errno -3] Try again` with no way out.
+          # Measured with the documented method: a mount namespace pointing
+          # /etc/resolv.conf at TEST-NET 203.0.113.1, curl as the positive
+          # control (000 without the fallback, 200 with).
+          #
+          # linux-static only. darwin resolves through libSystem and windows
+          # through winsock; neither takes this path, and both stay untouched.
+          dnsLdFlags =
+            "--wrap=getaddrinfo --wrap=freeaddrinfo --wrap=gethostbyname"
+            + " -L${ulib.dnsFallbackLib sp}/lib -lunpindns -lc";
+          interpDns =
+            if isDarwin then interp else ulib.appendLdFlags interp dnsLdFlags;
 
           # Step 1: scrubbed binary named `python` (+ its man for withMan), NO
           # stdlib yet. withMan/withAliases append their overlay ZIPs onto this
@@ -384,13 +781,13 @@ AC_CHECK_FUNCS([ \'
             buildPhase = ''
               runHook preBuild
               mkdir -p $out/bin
-              cp "${interp}/bin/python${pyMajor}" $out/bin/python
+              cp "${interpDns}/bin/python${pyMajor}" $out/bin/python
               chmod +w $out/bin/python
-              python3 ${./scrub_prefix.py} $out/bin/python "${interp}"
+              python3 ${./scrub_prefix.py} $out/bin/python "${interpDns}"
               # carry the interpreter's own man so withMan can harvest it
-              if [ -d "${interp}/share/man" ]; then
+              if [ -d "${interpDns}/share/man" ]; then
                 mkdir -p $out/share
-                cp -r "${interp}/share/man" $out/share/man
+                cp -r "${interpDns}/share/man" $out/share/man
               fi
               runHook postBuild
             '';
@@ -406,12 +803,12 @@ AC_CHECK_FUNCS([ \'
           base = base.overrideAttrs (old: {
             name = "python-onefile-${suffix}";
             passthru = (old.passthru or { })
-              // { inherit interp; pname = "python"; inherit (interp) version; };
+              // { interp = interpDns; pname = "python"; inherit (interp) version; };
           });
           embed = {
             man = true;
             aliases = aliasList;
-            runtimeStage = stdlibStageSh { srcInterp = interp; };
+            runtimeStage = stdlibStageSh { srcInterp = interpDns; };
           };
         };
 
@@ -470,8 +867,21 @@ AC_CHECK_FUNCS([ \'
               + getpathPatchSh
               + unpinzstdWireSh
               + zipimportPatchSh
+              + zipfilePatchSh
+              + venvPatchSh
+              + ctypesPatchSh
+              + resourcesPatchSh
+              + sslPatchSh
               + windowsConfigurePatchSh;
             postInstall = ''
+              # CPython's Unix Makefile installs venv/scripts/common and
+              # venv/scripts/posix and nothing else -- `nt` is the Windows
+              # installer's job, and a mingw cross build never runs it. The
+              # Windows binary therefore shipped a venv module that could not
+              # produce activate.bat/deactivate.bat for cmd.exe no matter what:
+              # the files were simply not there. Install them from the source.
+              mkdir -p $out/lib/python${pyMajor}/venv/scripts/nt
+              cp Lib/venv/scripts/nt/* $out/lib/python${pyMajor}/venv/scripts/nt/
               # nixpkgs' (!static)-guarded postInstall touches test/__init__.py;
               # our cross build is non-static so it runs, but --disable-test-modules
               # installed no test/ dir. Pre-create it so the touch succeeds.
@@ -549,7 +959,19 @@ AC_CHECK_FUNCS([ \'
       # darwin static is static-except-libSystem (no static libc on macOS); the
       # interpreter links Security + CoreFoundation for libunpinca's keychain
       # backend — both are public /System/Library/Frameworks, already allowed.
-      smoke = [ "--version" ];
-      smokePattern = "Python ${pyMajor}";
+      # The only gate that runs against the FINISHED artifact (the embed happens
+      # after `build`, so a `doCheck` here would only ever see the stdlib-less
+      # base binary). `--version` alone proved far too weak: it answers before
+      # the stdlib is touched, so it stayed green while `zipfile` could not read
+      # 566 of the archive's 618 members and `python -m venv` exited 1. This
+      # one-liner boots the interpreter, imports through zipimport, reads a
+      # member back through `zipfile` (method 93), and builds a real venv with
+      # pip -- offline, from the embedded wheel. Single line: action-build feeds
+      # each list element as one argv element, but reads them line by line.
+      smoke = [
+        "-c"
+        "import sys,os,ssl,venv,tempfile,zipfile,ensurepip; z=len(zipfile.ZipFile(sys.executable).read(\"json/__init__.py\")); ca=ssl.create_default_context().cert_store_stats()[\"x509_ca\"]; d=tempfile.mkdtemp(); venv.create(d,with_pip=True); b=os.path.join(d,\"Scripts\" if os.name==\"nt\" else \"bin\"); n=[x.lower() for x in os.listdir(b)]; print(\"unpin-smoke\",sys.version.split()[0],\"pip=%d\"%len([x for x in n if x.startswith(\"pip\")]),\"activate=%d\"%len([x for x in n if x.startswith(\"activate\")]),\"zip=%d\"%z,\"ca=%d\"%ca)"
+      ];
+      smokePattern = "unpin-smoke ${pyMajor}\\.[0-9]+ pip=[1-9][0-9]* activate=[1-9][0-9]* zip=[1-9][0-9]* ca=[1-9][0-9][0-9]";
     };
 }
