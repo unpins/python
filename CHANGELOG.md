@@ -4,6 +4,7 @@
 
 ### Changed
 
+- Updated to Python 3.13.15.
 - `python` starts about 7× faster: a startup hook wired the system's TLS trust
   roots into `ssl` on every single run, costing 291 ms of a 358 ms start. The
   roots are now read the first time something actually opens a TLS connection.
