@@ -697,18 +697,15 @@ AC_CHECK_FUNCS([ \'
               if isDarwin
               then builtins.filter (f: f != "LDFLAGS=-static") (old.configureFlags or [ ])
               else
-                # gdbm's off_map_lookup references malloc late in the link; the
-                # engine's whole-program LTO internalizes musl's WEAK `malloc`
-                # alias on some arches (riscv64/ppc64le drop it, x86_64/i686
-                # keep it) → `ld.lld: undefined symbol: malloc`. Force-keep it —
-                # the per-package analog of nix-lib's mega `bitcodeLibcForce`.
-                # `-u malloc` is a no-op where malloc is already retained, so
-                # x86_64/i686 stay byte-identical. Rides the existing
-                # LDFLAGS=-static → straight to the final CPython link.
-                map (f: if f == "LDFLAGS=-static"
-                        then "LDFLAGS=-static -Wl,-u,malloc"
-                        else f)
-                  (old.configureFlags or [ ]);
+                # This branch used to rewrite `LDFLAGS=-static` into
+                # `LDFLAGS=-static -Wl,-u,malloc`: gdbm's off_map_lookup
+                # references malloc late in the link and the engine's
+                # whole-program LTO internalizes musl's WEAK `malloc` alias on
+                # some arches (riscv64/ppc64le dropped it, x86_64/i686 kept it)
+                # → `ld.lld: undefined symbol: malloc`. nix-lib's engineLd now
+                # appends `-u malloc` to every full link on a Linux engine
+                # target, so the CPython link gets it without this rewrite.
+                (old.configureFlags or [ ]);
             meta = (old.meta or { }) // { broken = false; };
             # CPython's configure refuses to cross-compile to darwin: the
             # cross `case "$host"` arms cover linux/cygwin/ios/wasi/… but not
