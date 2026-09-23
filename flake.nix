@@ -49,10 +49,15 @@
         # --- stage the pure-Python stdlib at the ZIP root ($__unpin_stage) ---
         cp -r "${srcInterp}/lib/python${pyMajor}/." "$__unpin_stage/"
         chmod -R u+w "$__unpin_stage"
-        # drop test suites, dev/build artifacts, pip's marker, idle/turtle demos
+        # drop test suites, dev/build artifacts, pip's marker, idle/turtle demos.
+        # Two spellings of the build-config dir: `config-3.13-<triple>` on
+        # Linux/macOS, plain `config-3.13` on mingw — which is why the Windows
+        # binary carried libpython3.13.a (13 MB of it, 63 under the engine) for
+        # a build that can never happen: no Python.h ships with it.
         rm -rf "$__unpin_stage"/test "$__unpin_stage"/*/test "$__unpin_stage"/*/tests \
                "$__unpin_stage"/idlelib "$__unpin_stage"/turtledemo "$__unpin_stage"/lib2to3/tests \
-               "$__unpin_stage"/config-${pyMajor}-* "$__unpin_stage"/site-packages "$__unpin_stage"/EXTERNALLY-MANAGED \
+               "$__unpin_stage"/config-${pyMajor}-* "$__unpin_stage"/config-${pyMajor} \
+               "$__unpin_stage"/site-packages "$__unpin_stage"/EXTERNALLY-MANAGED \
                "$__unpin_stage"/ctypes/macholib/fetch_macholib*
         find "$__unpin_stage" -name '__pycache__' -type d -prune -exec rm -rf {} +
 
@@ -804,7 +809,6 @@ AC_CHECK_FUNCS([ \'
           });
           embed = {
             man = true;
-            aliases = aliasList;
             runtimeStage = stdlibStageSh { srcInterp = interpDns; };
           };
         };
@@ -900,6 +904,13 @@ AC_CHECK_FUNCS([ \'
               cp "${windowsPython}/bin/python${pyMajor}.exe" $out/bin/python.exe
               chmod +w $out/bin/python.exe
               python3 ${./scrub_prefix.py} $out/bin/python.exe "${windowsPython}"
+              # The engine compiles with `-g`, and the mingw strip nixpkgs runs
+              # over the interpreter leaves the PE's DWARF where it is — 29 MB of
+              # it, half the file. Strip it here, where the binary we ship is,
+              # with the toolchain that produced it. (nix-lib asserts the result
+              # carries no `.debug_*`, so a silent failure cannot ship.)
+              ${ulib.llvmMultitool pkgs.stdenv.buildPlatform.system} llvm-strip \
+                --strip-debug $out/bin/python.exe
               if [ -d "${windowsPython}/share/man" ]; then
                 mkdir -p $out/share
                 cp -r "${windowsPython}/share/man" $out/share/man
@@ -920,7 +931,6 @@ AC_CHECK_FUNCS([ \'
           });
           embed = {
             man = true;
-            aliases = aliasList;
             runtimeStage = stdlibStageSh { srcInterp = windowsPython; };
           };
         };
@@ -933,8 +943,22 @@ AC_CHECK_FUNCS([ \'
       # (all objects LLVM bitcode, whole-program LTO). `build`/`windowsBuild`
       # receive an engine-swapped pkgs whose `pkgsStatic` is the bitcode set, so
       # `sp = pkgs.pkgsStatic` in nativeBuild folds the interpreter under the
-      # engine automatically. Windows (mingw, off-engine) is unaffected.
+      # engine automatically.
       engine = "unpin-llvm";
+      # python is one program and dispatches nothing; the block is here to put
+      # the `.exe` on the engine too, instead of the nixpkgs mingw-gcc cross.
+      multicall = {
+        windows = true;
+        # No bitcode module: every target COPIES the interpreter nixpkgs'
+        # python3 built, so this package links nothing and there is no link for
+        # the module hook to capture. The engine is wanted for the compiler that
+        # builds that interpreter, not for a fold.
+        module = false;
+        # The aliases belong to the program, not to `runtimeEmbed`: with a
+        # `multicall` block the declared list is what the programs say, and a
+        # payload that announces a name the flake does not is a hard CI error.
+        programs = [{ name = "python"; aliases = aliasList; }];
+      };
       # Custom onefile build → no upstream meta.license to carry. CPython is
       # under the PSF License (nixpkgs `psfl`, SPDX Python-2.0).
       license = "Python-2.0";

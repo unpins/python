@@ -5,6 +5,19 @@
 ### Changed
 
 - Updated to Python 3.13.15.
+- The Windows binary is now built by the same compiler as the Linux and macOS
+  ones, and is about 21% smaller (29.3 MB to 23.0 MB). Most of that is a file
+  it should never have carried: `libpython3.13.a`, 13 MB meant for linking C
+  extensions against this interpreter, which cannot work here because no
+  header ships with it. Linux and macOS never carried it. Creating a virtual
+  environment with pip, the TLS trust roots, the embedded standard library and
+  the compiled modules (sqlite3, lzma, bz2, zlib, hashlib, decimal, ctypes,
+  ssl, unicodedata) were all checked under Wine and answer exactly as the
+  previous binary does.
+
+  It now uses the Universal C Runtime, which is part of Windows 10 and later.
+  On Windows 7 or 8.1 that runtime has to be installed first — it comes through
+  Windows Update. The previous binary did not need it.
 - `python` starts about 7× faster: a startup hook wired the system's TLS trust
   roots into `ssl` on every single run, costing 291 ms of a 358 ms start. The
   roots are now read the first time something actually opens a TLS connection.
