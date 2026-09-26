@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [3.13.15-1] - 2026-09-26
+
 ### Changed
 
 - Updated to Python 3.13.15.
