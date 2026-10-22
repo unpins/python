@@ -42,10 +42,10 @@
       # `withUnpinEmbed` runtimeStage snippet, so `$__unpin_stage` is the ZIP
       # root and the stdlib ends up in the SAME zstd ZIP as man + aliases (one
       # pack, not a separately-appended archive). The patched zipimport finds
-      # os.py, json/__init__.py, … at the root. Arch-agnostic: only .py
-      # shuffling + byte scrub. `srcInterp` is the patched interpreter store
-      # path (carries lib/python${pyMajor}).
-      stdlibStageSh = { srcInterp }: ''
+      # os.py, json/__init__.py, … at the root. Arch-agnostic: .py shuffling,
+      # byte scrub and bytecode. `srcInterp` is the patched interpreter store
+      # path (carries lib/python${pyMajor}); `buildPython` runs on the build host.
+      stdlibStageSh = { srcInterp, buildPython }: ''
         # --- stage the pure-Python stdlib at the ZIP root ($__unpin_stage) ---
         cp -r "${srcInterp}/lib/python${pyMajor}/." "$__unpin_stage/"
         chmod -R u+w "$__unpin_stage"
@@ -68,6 +68,22 @@
         # blanket cosmetic scrub of any remaining store path in the .py tree
         grep -rlZ '/nix/store/' "$__unpin_stage" --include='*.py' 2>/dev/null \
           | xargs -0 -r sed -i -E "s#/nix/store/[a-z0-9]{32}-[^ '\":]*#/unpin#g"
+
+        # Bytecode beside each .py. zipimport cannot write a cache, so without it
+        # every run recompiles every module it imports: `import json` 292 ms vs
+        # 54 ms. Legacy `foo.pyc` layout (zipimport never looks in __pycache__),
+        # unchecked-hash (nothing to validate against in an immutable archive),
+        # compiled AFTER the scrub so the .pyc matches the .py it ships with.
+        # co_filename is pinned to a fixed prefix (the stage dir is a build temp);
+        # the zipimport patch rewrites it to the real path at load. pyc is
+        # platform-independent, so the build-host interpreter serves every
+        # target -- as long as the minor version (the magic number) matches.
+        ${buildPython}/bin/python3 -c \
+          'import sys; sys.exit("%d.%d" % sys.version_info[:2] != "${pyMajor}")' \
+          || { echo "unpins: build python is not ${pyMajor}" >&2; exit 1; }
+        PYTHONHASHSEED=0 ${buildPython}/bin/python3 -m compileall -q -b \
+          --invalidation-mode unchecked-hash \
+          -s "$__unpin_stage" -p "/unpin/lib/python${pyMajor}" "$__unpin_stage"
       '';
 
       # getpath patches (shared linux/darwin/windows): (1) silence on-disk
@@ -178,6 +194,20 @@ def _get_data(archive, toc_entry):'
         # unpins: zstd-compressed (ZIP method 93), decoded by builtin _unpinzstd,
         # feeding the shared .unpin/zdict dictionary when present.
         return _unpin_zstd_decompress(archive, raw_data, file_size)'
+        # The stdlib ships `foo.pyc` beside `foo.py` (stdlibStageSh). zipimport
+        # tries the .pyc first but, unlike SourceFileLoader, keeps the
+        # compile-time co_filename and reports the .pyc as __file__. Point both
+        # at the .py, as they were before the bytecode shipped.
+        substituteInPlace Lib/zipimport.py --replace-fail \
+'            modpath = toc_entry[0]
+            return code, ispackage, modpath' \
+'            modpath = toc_entry[0]
+            if isbytecode:
+                src = self._get_files().get(fullpath[:-1])
+                if src is not None:
+                    modpath = src[0]
+                    _imp._fix_co_filename(code, modpath)
+            return code, ispackage, modpath'
       '';
 
       # Teach `zipfile` the same zstd (ZIP method 93) the zipimport patch above
@@ -809,7 +839,7 @@ AC_CHECK_FUNCS([ \'
           });
           embed = {
             man = true;
-            runtimeStage = stdlibStageSh { srcInterp = interpDns; };
+            runtimeStage = stdlibStageSh { srcInterp = interpDns; buildPython = pkgs.buildPackages.python3; };
           };
         };
 
@@ -931,7 +961,7 @@ AC_CHECK_FUNCS([ \'
           });
           embed = {
             man = true;
-            runtimeStage = stdlibStageSh { srcInterp = windowsPython; };
+            runtimeStage = stdlibStageSh { srcInterp = windowsPython; buildPython = pkgs.buildPackages.python3; };
           };
         };
     in

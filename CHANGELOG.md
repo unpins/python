@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Importing the standard library is about 5× faster: it now ships with its
+  bytecode precompiled, so modules are no longer recompiled on every run.
+  `import json` went from 262 ms to 51 ms, and a script importing twenty common
+  modules from 1.72 s to 0.20 s. The installed binary is about 17% larger
+  (22.7 MB to 26.5 MB). Tracebacks and `inspect.getsource` still show the
+  source lines, and `__file__` still points at the `.py` file.
+
 ## [3.13.15-1] - 2026-09-26
 
 ### Changed
