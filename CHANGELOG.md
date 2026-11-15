@@ -11,6 +11,15 @@
   (22.7 MB to 26.5 MB). Tracebacks and `inspect.getsource` still show the
   source lines, and `__file__` still points at the `.py` file.
 
+### Fixed
+
+- `zoneinfo` finds the system's time zones on Linux and macOS:
+  `ZoneInfo("America/Sao_Paulo")` failed with `No time zone found` because the
+  search path pointed at a directory that only existed on the build machine.
+  It now searches `/usr/share/zoneinfo` and the other usual places.
+- `mimetypes` now reads the system's `/etc/mime.types` and the other usual
+  files; its list held the same build-machine path.
+
 ## [3.13.15-1] - 2026-09-26
 
 ### Changed

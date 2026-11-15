@@ -720,6 +720,12 @@ AC_CHECK_FUNCS([ \'
             # engine link is unchanged. enableLTO defaults on for 64-bit
             # linux/darwin, so this matters on every native target.
             enableLTO = false;
+            # nixpkgs points zoneinfo's TZPATH and mimetypes' knownfiles at the
+            # store (tzdata, mailcap), and the stdlib scrub turns both into
+            # `/unpin`: zoneinfo found no time zones. Off, they keep upstream's
+            # host paths (/usr/share/zoneinfo…, /etc/mime.types…).
+            tzdata = null;
+            mimetypesSupport = false;
           }).overrideAttrs (old: {
             # darwin has no static libc, so a full `-static` link fails
             # configure's "C compiler cannot create executables" (why nixpkgs
@@ -872,6 +878,9 @@ AC_CHECK_FUNCS([ \'
             # instead of importing libcrypto-3-x64.dll. The Win32 syslibs static
             # openssl needs are added to the global LIBS line by mingw-3.13.patch.
             openssl = crossW64.openssl.override { static = true; };
+            # As in `interp`: no store paths for TZPATH and knownfiles.
+            tzdata = null;
+            mimetypesSupport = false;
           }).overrideAttrs (old: {
             meta = (old.meta or { }) // { broken = false; };
             # nixpkgs unconditionally adds Fedora's 3.11 mingw patchset when
