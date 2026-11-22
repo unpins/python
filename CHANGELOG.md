@@ -19,6 +19,10 @@
   It now searches `/usr/share/zoneinfo` and the other usual places.
 - `mimetypes` now reads the system's `/etc/mime.types` and the other usual
   files; its list held the same build-machine path.
+- On Windows, `pip` works inside a venv: `env\Scripts\pip` failed with
+  `No module named 'pip'`, because Python looked for packages in
+  `lib\python3.13\site-packages` while `venv` and `pip` install them in
+  `Lib\site-packages`.
 
 ## [3.13.15-1] - 2026-09-26
 

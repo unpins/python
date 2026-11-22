@@ -341,17 +341,6 @@
  #define _Py_COMP_DIAG_PUSH _Pragma("GCC diagnostic push")
  #define _Py_COMP_DIAG_IGNORE_DEPR_DECLS \
      _Pragma("GCC diagnostic ignored \"-Wdeprecated-declarations\"")
---- a/Lib/site.py
-+++ b/Lib/site.py
-@@ -399,7 +399,7 @@
-             abi_thread = 't'
-         else:
-             abi_thread = ''
--        if os.sep == '/':
-+        if True:  # os.sep == '/'  (mingw: always use unix layout)
-             libdirs = [sys.platlibdir]
-             if sys.platlibdir != "lib":
-                 libdirs.append("lib")
 --- a/Makefile.pre.in
 +++ b/Makefile.pre.in
 @@ -121,7 +121,7 @@

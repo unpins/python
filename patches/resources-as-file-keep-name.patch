@@ -1,0 +1,52 @@
+Keep the resource name in importlib.resources.as_file().
+
+For a member of a ZIP, as_file() materialised a copy with
+mkstemp(suffix=name), so the pip wheel arrived as tmpXXXXpip-....whl;
+ensurepip.version() and pip --find-links then read the wrong name and
+`python -m venv` failed. A private directory keeps the name intact with
+the same collision safety.
+
+--- a/Lib/importlib/resources/_common.py
++++ b/Lib/importlib/resources/_common.py
+@@ -145,8 +145,40 @@
+             pass
+ 
+ 
++@contextlib.contextmanager
++def _unpin_named_tempfile(
++    reader,
++    name,
++    # gh-93353: keep references for late Python finalization, as _tempfile does.
++    *,
++    _os_remove=os.remove,
++    _os_rmdir=os.rmdir,
++):
++    # unpins: materialise the resource under its REAL name inside a private
++    # directory, instead of mkstemp(suffix=name) which prepends tmpXXXXXX.
++    d = tempfile.mkdtemp()
++    raw_path = os.path.join(d, name)
++    try:
++        with open(raw_path, "wb") as f:
++            f.write(reader())
++        del reader
++        yield pathlib.Path(raw_path)
++    finally:
++        try:
++            _os_remove(raw_path)
++        except FileNotFoundError:
++            pass
++        try:
++            _os_rmdir(d)
++        except OSError:
++            pass
++
++
+ def _temp_file(path):
+-    return _tempfile(path.read_bytes, suffix=path.name)
++    name = os.path.basename(path.name or "")
++    if not name or name in (os.curdir, os.pardir):
++        return _tempfile(path.read_bytes, suffix=path.name)
++    return _unpin_named_tempfile(path.read_bytes, name)
+ 
+ 
+ def _is_present_dir(path: Traversable) -> bool:

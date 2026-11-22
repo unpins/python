@@ -1,0 +1,95 @@
+mingw: Win32 syslibs for link probes, _ssl certificate enumeration,
+select() on sockets.
+
+- configure.ac: put the Win32 syslibs in LIBS before the library-function
+  checks, and after -lssl -lcrypto in OPENSSL_LIBS, so the link probes
+  and the static OpenSSL link resolve their __imp_* references.
+- _ssl.c and its clinic header: enum_certificates/enum_crls were guarded
+  by _MSC_VER; mingw has wincrypt.h too (as msys2 0059).
+- pycore_fileutils.h: _PyIsSelectable_fd was _MSC_VER-only, so mingw used
+  fd < FD_SETSIZE, false for any SOCKET handle, and socket timeouts failed
+  with BlockingIOError 10035 (as msys2 0040).
+
+--- a/configure.ac
++++ b/configure.ac
+@@ -5285,6 +5285,8 @@
+   done
+ fi
+ 
++case $host in *-*-mingw*) LIBS="$LIBS -lws2_32 -liphlpapi -lrpcrt4 -lcrypt32 -ladvapi32 -luser32 -lbcrypt -lsecur32 -lgdi32" ;; esac
++
+ # checks for library functions
+ AC_CHECK_FUNCS([ \
+   accept4 bind_textdomain_codeset chmod chown clock closefrom close_range confstr \
+@@ -7469,6 +7471,8 @@
+ # Check for usable OpenSSL
+ AX_CHECK_OPENSSL([have_openssl=yes],[have_openssl=no])
+ 
++case $host in *-*-mingw*) OPENSSL_LIBS="$OPENSSL_LIBS -lws2_32 -lcrypt32 -ladvapi32 -luser32 -lbcrypt -lsecur32 -lgdi32" ;; esac
++
+ # rpath to libssl and libcrypto
+ AS_VAR_IF([GNULD], [yes], [
+   rpath_arg="-Wl,--enable-new-dtags,-rpath="
+--- a/Modules/_ssl.c
++++ b/Modules/_ssl.c
+@@ -5894,7 +5894,7 @@
+     return result;
+ }
+ 
+-#ifdef _MSC_VER
++#ifdef _WIN32
+ 
+ static PyObject*
+ certEncodingType(DWORD encodingType)
+@@ -6213,7 +6213,7 @@
+     }
+ }
+ 
+-#endif /* _MSC_VER */
++#endif /* _WIN32 */
+ 
+ /* List of functions exported by this module. */
+ static PyMethodDef PySSL_methods[] = {
+--- a/Modules/clinic/_ssl.c.h
++++ b/Modules/clinic/_ssl.c.h
+@@ -2709,7 +2709,7 @@
+     return return_value;
+ }
+ 
+-#if defined(_MSC_VER)
++#if defined(_WIN32)
+ 
+ PyDoc_STRVAR(_ssl_enum_certificates__doc__,
+ "enum_certificates($module, /, store_name)\n"
+@@ -2786,9 +2786,9 @@
+     return return_value;
+ }
+ 
+-#endif /* defined(_MSC_VER) */
++#endif /* defined(_WIN32) */
+ 
+-#if defined(_MSC_VER)
++#if defined(_WIN32)
+ 
+ PyDoc_STRVAR(_ssl_enum_crls__doc__,
+ "enum_crls($module, /, store_name)\n"
+@@ -2864,7 +2864,7 @@
+     return return_value;
+ }
+ 
+-#endif /* defined(_MSC_VER) */
++#endif /* defined(_WIN32) */
+ 
+ #ifndef _SSL_ENUM_CERTIFICATES_METHODDEF
+     #define _SSL_ENUM_CERTIFICATES_METHODDEF
+--- a/Include/internal/pycore_fileutils.h
++++ b/Include/internal/pycore_fileutils.h
+@@ -12,7 +12,7 @@
+ 
+ 
+ /* A routine to check if a file descriptor can be select()-ed. */
+-#ifdef _MSC_VER
++#ifdef MS_WINDOWS
+     /* On Windows, any socket fd can be select()-ed, no matter how high */
+     #define _PyIsSelectable_fd(FD) (1)
+ #else

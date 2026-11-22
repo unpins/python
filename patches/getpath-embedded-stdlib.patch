@@ -1,0 +1,31 @@
+Serve the stdlib from the executable itself.
+
+The stdlib is a ZIP appended to the binary, so there is no on-disk prefix:
+silence the landmark warnings, and put the executable (resolved through
+any symlink) on sys.path for zipimport to read.
+
+--- a/Modules/getpath.py
++++ b/Modules/getpath.py
+@@ -226,6 +226,7 @@
+ ENV_PYTHONPATH = config['pythonpath_env']
+ use_environment = config.get('use_environment', 1)
+ 
++warn = lambda *a, **k: None  # unpins: stdlib is embedded, no on-disk prefix
+ pythonpath = config.get('module_search_paths')
+ pythonpath_was_set = config.get('module_search_paths_set')
+ stdlib_dir = config.get('stdlib_dir')
+@@ -655,6 +656,14 @@
+     # recalculate paths while running then we do not want to change it.
+     pythonpath = []
+ 
++    # unpins: serve stdlib zip appended to the executable itself.
++    # `executable` is always defined here (set at module top); `real_executable`
++    # is only conditionally assigned, so guard it via globals() to resolve
++    # symlink/alias invocations to the real binary when available.
++    _u = globals().get("real_executable") or executable
++    if _u and _u not in pythonpath:
++        pythonpath.append(_u)
++
+     # First add entries from the process environment
+     if use_environment and ENV_PYTHONPATH:
+         for p in ENV_PYTHONPATH.split(DELIM):

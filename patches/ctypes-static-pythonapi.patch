@@ -1,0 +1,31 @@
+Keep ctypes importable when dlopen(NULL) fails.
+
+ctypes ends with `pythonapi = PyDLL(None)`, and dlopen(NULL) always fails
+in static musl, so the OSError took the whole module down, past code that
+probes with `except ImportError`. Loading libraries is what a static
+binary cannot do; Structure, c_int, CFUNCTYPE, memmove and friends still
+work. Defer the error to the use of pythonapi. Inert where dlopen(NULL)
+succeeds (darwin) and on Windows.
+
+--- a/Lib/ctypes/__init__.py
++++ b/Lib/ctypes/__init__.py
+@@ -492,7 +492,18 @@
+     # These are Unix-like platforms which use a dynamically-linked libpython.
+     pythonapi = PyDLL(_sysconfig.get_config_var("LDLIBRARY"))
+ else:
+-    pythonapi = PyDLL(None)
++    try:
++        pythonapi = PyDLL(None)
++    except OSError:
++        # unpins: static build -- no dynamic loader, so there is no handle to
++        # the running program. Defer the error to whoever actually asks.
++        class _UnpinNoDynamicLoader:
++            def __getattr__(self, name):
++                raise OSError(
++                    "ctypes.pythonapi is unavailable: this is a statically "
++                    "linked build with no dynamic loader")
++
++        pythonapi = _UnpinNoDynamicLoader()
+ 
+ 
+ if _os.name == "nt":

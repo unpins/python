@@ -1,0 +1,78 @@
+Load the default CA roots from _unpinca (macOS).
+
+_unpinca reads the live Keychain roots plus an embedded Mozilla fallback.
+The roots are computed once, on the first context that asks for defaults,
+and the PEM scan avoids `re`, so a python that never opens a TLS
+connection pays nothing for it.
+
+--- a/Lib/ssl.py
++++ b/Lib/ssl.py
+@@ -525,9 +525,68 @@
+         except PermissionError:
+             warnings.warn("unable to enumerate Windows certificate store")
+ 
++    # unpins: False = not computed yet, None = no native roots available.
++    _unpin_pem = False
++
++    def _unpin_default_pem(self):
++        # unpins: the platform live trust roots (macOS Keychain, Windows ROOT
++        # store, Linux system bundle) plus the embedded Mozilla fallback, from
++        # the builtin _unpinca. Computed once, on the first context that asks.
++        if SSLContext._unpin_pem is not False:
++            return SSLContext._unpin_pem
++        SSLContext._unpin_pem = None
++        try:
++            import _unpinca
++            if sys.platform == "win32":
++                # Windows ships few roots and fetches the rest on demand via
++                # Automatic Root Update, which OpenSSL never triggers -- and a
++                # sparse but non-empty store would suppress the fallback. Union
++                # the live store (it honours enterprise roots) with the
++                # fallback so public sites verify either way.
++                parts = []
++                native = _unpinca.native_pem()
++                if native:
++                    parts.append(native)
++                parts.append(_unpinca.fallback_pem())
++                src = "\n".join(parts)
++            else:
++                # SSL_CERT_FILE / SSL_CERT_DIR precedence lives inside
++                # libunpinca: when either is set the env wins and the platform
++                # store is skipped, so this already reflects the override.
++                src = _unpinca.roots_pem()
++        except Exception:
++            return None
++        # load_verify_locations(cadata=str) demands pure ASCII, and CA bundles
++        # carry non-ASCII friendly-name labels between the blocks. Keep only
++        # the base64 blocks, which are ASCII by definition.
++        blocks = []
++        begin = "-----BEGIN CERTIFICATE-----"
++        end = "-----END CERTIFICATE-----"
++        i = 0
++        while True:
++            a = src.find(begin, i)
++            if a < 0:
++                break
++            b = src.find(end, a)
++            if b < 0:
++                break
++            b += len(end)
++            blocks.append(src[a:b])
++            i = b
++        if blocks:
++            SSLContext._unpin_pem = "\n".join(blocks) + "\n"
++        return SSLContext._unpin_pem
++
+     def load_default_certs(self, purpose=Purpose.SERVER_AUTH):
+         if not isinstance(purpose, _ASN1Object):
+             raise TypeError(purpose)
++        pem = self._unpin_default_pem()
++        if pem:
++            try:
++                self.load_verify_locations(cadata=pem)
++                return
++            except Exception:
++                pass
+         if sys.platform == "win32":
+             for storename in self._windows_cert_stores:
+                 self._load_windows_store_certs(storename, purpose)

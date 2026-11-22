@@ -1,0 +1,117 @@
+Let zipfile read zstd (ZIP method 93) too.
+
+zipimport serves the .py modules, but every other resource (the bundled
+pip wheel, the venv activate scripts, the pydoc CSS) is read through
+zipfile, which importlib.resources sits on. Without this, 566 of the 618
+members raised NotImplementedError and `python -m venv` failed because
+ensurepip could not read its wheel. Writing method 93 stays unsupported.
+
+--- a/Lib/zipfile/__init__.py
++++ b/Lib/zipfile/__init__.py
+@@ -767,6 +767,62 @@
+     98: 'ppmd',
+ }
+ 
++UNPIN_ZIP_ZSTD = 93
++_unpin_zdict_cache = {}
++
++
++def _unpin_zdict_for(archive):
++    # unpins: the packer trains ONE zstd dictionary per archive and stores it
++    # as the STORED member ".unpin/zdict"; frames compressed against it cannot
++    # be decoded without it. Reading it opens a second, independent ZipFile on
++    # the same path -- a STORED member needs no decompressor, so this cannot
++    # recurse back into here.
++    try:
++        return _unpin_zdict_cache[archive]
++    except KeyError:
++        pass
++    d = None
++    if archive:
++        try:
++            with ZipFile(archive) as zf:
++                d = zf.read(".unpin/zdict")
++        except Exception:
++            d = None
++    _unpin_zdict_cache[archive] = d
++    return d
++
++
++class _UnpinZstdDecompressor:
++    """unpins: decode ZIP method 93 (zstd) through the builtin _unpinzstd.
++
++    The unpins packer writes one zstd frame per member, so there is nothing to
++    stream: buffer the compressed bytes and decode once the last one arrives.
++    ZipExtFile only requires .decompress(data) plus .eof -- the same contract
++    the LZMADecompressor wrapper above satisfies.
++    """
++
++    def __init__(self, zdict=None, compress_size=0, file_size=0):
++        self._zdict = zdict
++        self._compress_size = compress_size
++        self._file_size = file_size
++        self._buf = b""
++        self.eof = False
++
++    def decompress(self, data):
++        self._buf += data
++        if len(self._buf) < self._compress_size:
++            return b""
++        try:
++            from _unpinzstd import decompress as _unpin_decompress
++        except ImportError:
++            raise NotImplementedError(
++                "compression type 93 (zstd) needs the _unpinzstd builtin")
++        out = _unpin_decompress(self._buf, self._file_size, self._zdict)
++        self._buf = b""
++        self.eof = True
++        return out
++
++
+ def _check_compression(compression):
+     if compression == ZIP_STORED:
+         pass
+@@ -802,7 +858,12 @@
+         return None
+ 
+ 
+-def _get_decompressor(compress_type):
++def _get_decompressor(compress_type, zdict=None, compress_size=0, file_size=0):
++    if compress_type == UNPIN_ZIP_ZSTD:
++        # unpins: answered BEFORE _check_compression on purpose, so the WRITE
++        # path (_get_compressor, ZipFile(mode=w, compression=93)) keeps
++        # rejecting method 93 instead of silently storing data uncompressed.
++        return _UnpinZstdDecompressor(zdict, compress_size, file_size)
+     _check_compression(compress_type)
+     if compress_type == ZIP_STORED:
+         return None
+@@ -907,7 +968,17 @@
+         self._compress_left = zipinfo.compress_size
+         self._left = zipinfo.file_size
+ 
+-        self._decompressor = _get_decompressor(self._compress_type)
++        # unpins: method 93 needs the archive shared dictionary. Reach the
++        # backing path through the _SharedFile wrapper; an archive opened from
++        # a bare file object has no name, and then only dict-less frames decode.
++        self._unpin_zdict = None
++        if self._compress_type == UNPIN_ZIP_ZSTD:
++            self._unpin_zdict = _unpin_zdict_for(
++                getattr(getattr(fileobj, "_file", None), "name", None))
++
++        self._decompressor = _get_decompressor(
++            self._compress_type, self._unpin_zdict,
++            zipinfo.compress_size, zipinfo.file_size)
+ 
+         self._eof = False
+         self._readbuffer = b''
+@@ -1206,7 +1277,9 @@
+             self._left = self._orig_file_size
+             self._readbuffer = b''
+             self._offset = 0
+-            self._decompressor = _get_decompressor(self._compress_type)
++            self._decompressor = _get_decompressor(
++                self._compress_type, self._unpin_zdict,
++                self._orig_compress_size, self._orig_file_size)
+             self._eof = False
+             read_offset = new_pos
+             if self._decrypter is not None:

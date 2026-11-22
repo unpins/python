@@ -33,6 +33,10 @@ python -m venv env
 env/bin/pip install requests
 ```
 
+## Man pages
+
+`python.1` is embedded in the binary — read it with `unpin man python`.
+
 ## Build locally
 
 ```bash
@@ -54,7 +58,7 @@ The [Releases](https://github.com/unpins/python/releases) page has standalone bi
 
 ## TLS / certificates
 
-HTTPS works with no `certifi` and no `SSL_CERT_FILE`: the binary reads the platform's live trust roots (macOS Keychain, Windows ROOT store, or the Linux system bundle) and falls back to an embedded Mozilla CA set. `SSL_CERT_FILE` / `SSL_CERT_DIR` still override when set.
+HTTPS works with no `certifi` and no `SSL_CERT_FILE`. On Linux the binary uses the distribution's CA bundle, wherever the distribution keeps it, and an embedded Mozilla CA set on a system without one. On macOS it reads the live Keychain roots, with the embedded set as fallback. On Windows it reads the system's CA and ROOT stores and adds the embedded set, since Windows fetches most roots only on demand. `SSL_CERT_FILE` / `SSL_CERT_DIR` choose another file or directory, as in any OpenSSL program.
 
 ## Build notes
 
@@ -64,3 +68,4 @@ HTTPS works with no `certifi` and no `SSL_CERT_FILE`: the binary reads the platf
 - **CPython's own test suite is not run.** It is most of the stdlib's size, so it is stripped from the embedded copy, and a full run takes hours. What runs in its place, on every platform and against the finished single file, is a check that boots the interpreter, reads a stdlib file back out of the binary, and builds a real virtual environment with a working `pip`.
 - **Packages go in a venv.** The embedded stdlib is read-only, so `python -m pip` won't install into the binary — but `ensurepip` + a bundled pip wheel are embedded, so `python -m venv env` gives a venv with a working `pip`.
 - **Platforms.** macOS is static-except-`libSystem` (Keychain trust via the public `Security`/`CoreFoundation` frameworks); Windows is a mingw single `.exe` importing only system DLLs (ROOT-store trust via `crypt32`).
+- **No `tkinter`, IDLE or `turtle`** — they need Tk, a GUI toolkit that is not part of this build.

@@ -1,0 +1,73 @@
+Let the frozen zipimport inflate zstd (ZIP method 93).
+
+The embedded stdlib is packed as zstd. The decoder is the _unpinzstd
+builtin, fed the shared .unpin/zdict dictionary the packer trains (a
+STORED entry, read through the plain path and cached per archive). The
+lazy import mirrors _get_decompress_func, so a stray _unpinzstd.py in some
+zip cannot recurse.
+
+--- a/Lib/zipimport.py
++++ b/Lib/zipimport.py
+@@ -609,6 +609,38 @@
+     return decompress
+ 
+ # Given a path to a Zip file and a toc_entry, return the (uncompressed) data.
++_importing_unpinzstd = False
++_unpin_zdict_cache = {}
++def _unpin_get_zdict(archive):
++    try:
++        return _unpin_zdict_cache[archive]
++    except KeyError:
++        pass
++    d = None
++    try:
++        files = _zip_directory_cache.get(archive)
++        if files:
++            toc = files.get(".unpin" + path_sep + "zdict")
++            if toc is not None:
++                d = _get_data(archive, toc)
++    except Exception:
++        d = None
++    _unpin_zdict_cache[archive] = d
++    return d
++def _unpin_zstd_decompress(archive, raw_data, file_size):
++    global _importing_unpinzstd
++    if _importing_unpinzstd:
++        raise ZipImportError("cannot decompress data; _unpinzstd not available")
++    _importing_unpinzstd = True
++    try:
++        from _unpinzstd import decompress
++    except Exception:
++        raise ZipImportError("cannot decompress data; zstd not available")
++    finally:
++        _importing_unpinzstd = False
++    return decompress(raw_data, file_size, _unpin_get_zdict(archive))
++
++
+ def _get_data(archive, toc_entry):
+     datapath, compress, data_size, file_size, file_offset, time, date, crc = toc_entry
+     if data_size < 0:
+@@ -644,6 +676,11 @@
+         # data is not compressed
+         return raw_data
+ 
++    if compress == 93:
++        # unpins: zstd-compressed (ZIP method 93), decoded by builtin _unpinzstd,
++        # feeding the shared .unpin/zdict dictionary when present.
++        return _unpin_zstd_decompress(archive, raw_data, file_size)
++
+     # Decompress with zlib
+     try:
+         decompress = _get_decompress_func()
+@@ -794,6 +831,11 @@
+                 # in byte code, try next
+                 continue
+             modpath = toc_entry[0]
++            if isbytecode:
++                src = self._get_files().get(fullpath[:-1])
++                if src is not None:
++                    modpath = src[0]
++                    _imp._fix_co_filename(code, modpath)
+             return code, ispackage, modpath
+     else:
+         if import_error:

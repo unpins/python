@@ -1,0 +1,91 @@
+Install the venv activate scripts out of the archive.
+
+venv walks venv/scripts on disk; with the stdlib embedded there is no
+such directory, so every venv came out with no activate script and exit
+status 0.
+
+--- a/Lib/venv/__init__.py
++++ b/Lib/venv/__init__.py
+@@ -405,6 +405,24 @@
+                         logger.warning('Retrying with copies')
+                         break
+ 
++            # unpins: CPython ships venvlauncher.exe / venvwlauncher.exe with
++            # its Windows INSTALLER, and venv copies them into the new
++            # environment. A mingw cross build produces neither, and the
++            # directory they are looked up in lives inside the ZIP appended to
++            # the executable, so every copy failed, Scripts\\python.exe was never
++            # created, and the environment was unusable -- the only sign being
++            # two "Unable to copy" warnings on the way past. Fall back to the
++            # interpreter itself, which is the right answer for a single-file
++            # build anyway: the environment is defined by the pyvenv.cfg next to
++            # the executable, and our binary carries its own stdlib wherever it
++            # is copied. The pythonw names are dropped: this is a console build,
++            # and a second 29 MB copy would buy nothing.
++            if not any(os.path.exists(src) for src in copy_sources.values()):
++                copy_sources = {
++                    dest: context.executable for dest in copy_sources
++                    if not os.path.normcase(dest).startswith("pythonw")
++                }
++
+             if do_copies:
+                 for dest, src in copy_sources.items():
+                     dest = os.path.join(binpath, dest)
+@@ -519,6 +537,42 @@
+             text = text.replace(key, quoted)
+         return text
+ 
++    def _unpin_install_scripts_from_zip(self, context, path):
++        # unpins: install_scripts() for an embedded (zipimport) stdlib. Mirrors
++        # the os.walk() loop below -- only the "common" and os.name
++        # directories, same destination layout, same variable substitution --
++        # but reads the members from the ZIP appended to the executable.
++        import zipfile
++        archive = getattr(globals().get("__loader__"), "archive", None)
++        if not archive:
++            return
++        prefix = path[len(archive):].strip("/" + os.sep).replace(os.sep, "/")
++        binpath = context.bin_path
++        with zipfile.ZipFile(archive) as zf:
++            for name in zf.namelist():
++                if name.endswith("/") or not name.startswith(prefix + "/"):
++                    continue
++                parts = name[len(prefix) + 1:].split("/")
++                if len(parts) < 2 or parts[0] not in ("common", os.name):
++                    continue
++                dstdir = os.path.join(binpath, *parts[1:-1])
++                os.makedirs(dstdir, exist_ok=True)
++                dstfile = os.path.join(dstdir, parts[-1])
++                data = zf.read(name)
++                try:
++                    context.script_path = name
++                    new_data = (
++                        self.replace_variables(data.decode("utf-8"), context)
++                            .encode("utf-8")
++                    )
++                except UnicodeError as e:
++                    logger.warning("unable to copy script %r, "
++                                   "may be binary: %s", name, e)
++                    continue
++                with open(dstfile, "wb") as f:
++                    f.write(new_data)
++                os.chmod(dstfile, 0o644)
++
+     def install_scripts(self, context, path):
+         """
+         Install scripts into the created environment from a directory.
+@@ -532,6 +586,14 @@
+                         Placeholder variables are replaced with environment-
+                         specific values.
+         """
++        if not os.path.isdir(path):
++            # unpins: the stdlib is a ZIP appended to the executable, so
++            # venv/scripts is not a directory and the os.walk() below finds
++            # nothing -- leaving every venv without its activate scripts,
++            # silently and with a zero exit status.
++            self._unpin_install_scripts_from_zip(context, path)
++            return
++
+         binpath = context.bin_path
+         plen = len(path)
+         if os.name == 'nt':
