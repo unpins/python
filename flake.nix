@@ -100,7 +100,6 @@
         "zipimport-zstd"
         "zipfile-zstd"
         "venv-scripts-from-zip"
-        "ctypes-static-pythonapi"
         "resources-as-file-keep-name"
       ];
 
@@ -200,7 +199,11 @@
                   CC_FOR_BUILD = buildCc;
                   BUILD_CFLAGS = "-g -fuse-ld=${ld64}";
                 };
-                configureFlags = (o.configureFlags or [ ]) ++ [ "--with-tclsh=${tclsh}" ];
+                # nixpkgs passes its own on cross builds; autosetup joins two
+                # into one command, `tclsh tclsh`.
+                configureFlags = builtins.filter
+                  (f: !(lib.hasPrefix "--with-tclsh=" f))
+                  (o.configureFlags or [ ]) ++ [ "--with-tclsh=${tclsh}" ];
                 makeFlags = (o.makeFlags or [ ]) ++ [ "TCLSH_CMD=${tclsh}" ];
               });
 
